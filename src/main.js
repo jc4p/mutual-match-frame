@@ -9,7 +9,7 @@ const API_ROOT = 'https://mutual-match-api.kasra.codes';
 console.log("Encrypted Mutual Match App Initializing...");
 
 // --- Debug Console Start ---
-let debugConsoleVisible = true;
+let debugConsoleVisible = false;
 const originalConsole = {
     log: console.log.bind(console),
     warn: console.warn.bind(console),
@@ -127,6 +127,11 @@ function initDebugConsole() {
     document.body.appendChild(floater);
 
     const toggleButton = document.getElementById('debug-console-toggle');
+    
+    // Set initial state based on debugConsoleVisible
+    floater.classList.toggle('minimized', !debugConsoleVisible);
+    toggleButton.textContent = debugConsoleVisible ? 'Minimize' : 'Maximize';
+    
     toggleButton.addEventListener('click', () => {
         debugConsoleVisible = !debugConsoleVisible;
         floater.classList.toggle('minimized', !debugConsoleVisible);
@@ -304,13 +309,7 @@ async function connectAndSign() {
         console.log("signMessage result:", signedMessageResult);
         
         let signature;
-        if (signedMessageResult && signedMessageResult.signature instanceof Uint8Array) {
-            signature = signedMessageResult.signature;
-        } else if (signedMessageResult instanceof Uint8Array) { // If signMessage directly returns Uint8Array
-            signature = signedMessageResult; 
-        } else if (signedMessageResult && typeof signedMessageResult.signature === 'string') {
-            // Solana providers typically return Base58 encoded strings for signatures.
-            console.warn("Signature from provider is a string, attempting to decode as Base58.");
+        if (signedMessageResult && typeof signedMessageResult.signature === 'string') {
             try {
                 signature = bs58.decode(signedMessageResult.signature);
                 if (signature.length === 0) throw new Error("Decoded signature is empty (was it a valid Base58 string?)");
@@ -321,7 +320,7 @@ async function connectAndSign() {
                  return null;
             }
         } else {
-            console.error("Unexpected signature format from signMessage:", signedMessageResult);
+            console.error("Unexpected signature format from signMessage. Expected an object with a string 'signature' property. Received:", signedMessageResult);
             statusMessageDiv.innerHTML = '<p>Error: Unexpected signature format.</p>';
             contentDiv.innerHTML = '<p>Received an unexpected signature format from the wallet for the message signature.</p>';
             return null;
