@@ -298,10 +298,9 @@ async function connectAndSign() {
         console.log("Successfully obtained publicKey string:", publicKeyString);
         statusMessageDiv.innerHTML = `<p>Wallet connected: ${publicKeyString.slice(0,4)}...${publicKeyString.slice(-4)}. Signing message...</p>`;
 
-        const messageString = "farcaster-crush-v1";
-        const message = new TextEncoder().encode(messageString);
+        const messageString = "Logging into encrypted mutual match";
         console.log(`Attempting to sign message: "${messageString}"`);
-        const signedMessageResult = await solanaProvider.signMessage(message, "utf8");
+        const signedMessageResult = await solanaProvider.signMessage(messageString);
         console.log("signMessage result:", signedMessageResult);
         
         let signature;
