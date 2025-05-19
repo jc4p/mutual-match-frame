@@ -298,7 +298,7 @@ async function connectAndSign() {
         console.log("Successfully obtained publicKey string:", publicKeyString);
         statusMessageDiv.innerHTML = `<p>Wallet connected: ${publicKeyString.slice(0,4)}...${publicKeyString.slice(-4)}. Signing message...</p>`;
 
-        const messageString = "Logging into encrypted mutual match";
+        const messageString = "This is a message to confirm you are logging into encrypted mutual match using your Warplet!";
         console.log(`Attempting to sign message: "${messageString}"`);
         const signedMessageResult = await solanaProvider.signMessage(messageString);
         console.log("signMessage result:", signedMessageResult);
@@ -309,21 +309,15 @@ async function connectAndSign() {
         } else if (signedMessageResult instanceof Uint8Array) { // If signMessage directly returns Uint8Array
             signature = signedMessageResult; 
         } else if (signedMessageResult && typeof signedMessageResult.signature === 'string') {
-            // Handle if signature is a base64 or hex string from provider (needs decoding)
-            // This is an assumption; adapt if provider returns string signature differently
-            console.warn("Signature from provider is a string, attempting to decode (assuming base64 for now).");
+            // Solana providers typically return Base58 encoded strings for signatures.
+            console.warn("Signature from provider is a string, attempting to decode as Base58.");
             try {
-                // Assuming it might be base64 encoded string of the signature bytes
-                const decodedString = atob(signedMessageResult.signature);
-                signature = new Uint8Array(decodedString.length);
-                for (let i = 0; i < decodedString.length; i++) {
-                    signature[i] = decodedString.charCodeAt(i);
-                }
-                if (signature.length === 0) throw new Error("Decoded signature is empty (was it base64?)");
+                signature = bs58.decode(signedMessageResult.signature);
+                if (signature.length === 0) throw new Error("Decoded signature is empty (was it a valid Base58 string?)");
             } catch (e) {
-                 console.error("Failed to decode string signature:", e, "Original string:", signedMessageResult.signature);
+                 console.error("Failed to decode Base58 string signature:", e, "Original string:", signedMessageResult.signature);
                  statusMessageDiv.innerHTML = '<p>Error: Could not decode signature.</p>';
-                 contentDiv.innerHTML = '<p>The signature format from the wallet was an undecodable string.</p>';
+                 contentDiv.innerHTML = '<p>The signature format from the wallet was an undecodable string (expected Base58).</p>';
                  return null;
             }
         } else {
@@ -353,7 +347,6 @@ async function connectAndSign() {
         statusMessageDiv.innerHTML = `<p>Successfully signed message and derived kWallet!</p>`;
         
         contentDiv.innerHTML = `
-            <p>Your Public Key: ${publicKeyString}</p>
             <p>kWallet derived. You can now search for a user to send a secret crush.</p>
             <p><small>Raw Signature (first 16B hex): ${bytesToHex(signature.slice(0,16))}</small></p>
             <p><small>kWallet (first 8B hex): ${bytesToHex(kWallet.slice(0,8))}</small></p>
