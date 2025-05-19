@@ -393,10 +393,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     const statusMessageDiv = document.getElementById('statusMessage');
     const contentDiv = document.getElementById('content');
 
-    try {
-        if (statusMessageDiv) statusMessageDiv.innerHTML = "<p>Farcaster SDK actions.ready()...</p>";
-        await frame.sdk.actions.ready();
-        console.log("Farcaster SDK is ready (frame.sdk.actions.ready() resolved).");
+    setTimeout(async () => {
+        try {
+            if (statusMessageDiv) statusMessageDiv.innerHTML = "<p>Farcaster SDK actions.ready()...</p>";
+            await frame.sdk.actions.ready();
+            console.log("Farcaster SDK is ready (frame.sdk.actions.ready() resolved).");
         if (statusMessageDiv) statusMessageDiv.innerHTML = "<p>Farcaster SDK Ready. Checking for Solana Provider...</p>";
 
         console.log("Attempting to get Solana provider from frame.sdk.experimental...");
@@ -427,7 +428,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         console.error("Error during Farcaster SDK ready/provider init:", error);
         if (statusMessageDiv) statusMessageDiv.innerHTML = "<p>Error initializing Farcaster SDK features.</p>";
         if (contentDiv) contentDiv.innerHTML = "<p>An error occurred. See debug console.</p>";
-    }
+    }}, 1000);
 });
 
 // Further steps from PRD section 4.2 (Front-End Requirements - Key steps per crush)
