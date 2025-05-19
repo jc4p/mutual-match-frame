@@ -153,6 +153,7 @@ function initDebugConsole() {
 let sessionKWallet = null;
 let sessionPublicKey = null;
 let selectedTargetUser = null; // To store { fid, username, display_name, pfp_url, primary_sol_address }
+let solanaProvider = null; // Moved to higher scope
 
 // Debounce utility
 function debounce(func, delay) {
@@ -249,8 +250,8 @@ const debouncedSearchUsers = debounce(searchUsers, 300);
 // Placeholder for wallet interaction and signing
 async function connectAndSign() {
     console.log("--- connectAndSign called ---");
-    console.log("Farcaster frame.sdk object:", frame.sdk);
-    console.log("frame.sdk.experimental:", frame.sdk?.experimental);
+    // frame.sdk and solanaProvider are now logged earlier (on DOMContentLoaded)
+    // We will use the module-scoped solanaProvider here.
 
     const contentDiv = document.getElementById('content');
     const statusMessageDiv = document.getElementById('statusMessage');
@@ -259,48 +260,55 @@ async function connectAndSign() {
         console.error("UI elements (content/statusMessage) not found");
         return null;
     }
+
+    if (!solanaProvider) {
+        console.error("Solana provider was not initialized earlier. Cannot proceed with connectAndSign.");
+        statusMessageDiv.innerHTML = '<p>Error: Solana Wallet Provider not available.</p>';
+        contentDiv.innerHTML = '<p>Please ensure your Farcaster client is set up correctly. Check debug console.</p>';
+        return null;
+    }
+    console.log("Using pre-initialized Solana Provider:", solanaProvider);
     statusMessageDiv.innerHTML = "<p>Connecting to wallet...</p>";
 
     try {
-        const solanaProvider = frame.sdk.experimental.getSolanaProvider();
-        console.log("Solana Provider object:", solanaProvider);
-        if (!solanaProvider) {
-            console.error("Solana provider is null or undefined.");
-            statusMessageDiv.innerHTML = '<p>Error: Solana wallet provider not found.</p>';
-            contentDiv.innerHTML = '<p>Please ensure your Farcaster client supports this feature and your wallet is connected. Check debug console for details.</p>';
-            return null;
-        }
-
+        // publicKey acquisition, signing etc. using the existing solanaProvider variable
         let publicKey;
         if (solanaProvider.publicKey) {
             publicKey = solanaProvider.publicKey;
+            console.log("Using existing publicKey from provider:", publicKey?.toString());
         } else if (typeof solanaProvider.connect === 'function') {
             try {
+                console.log("Attempting solanaProvider.connect()...");
                 statusMessageDiv.innerHTML = "<p>Awaiting wallet connection approval...</p>";
-                const connectionResponse = await solanaProvider.connect();
+                const connectionResponse = await solanaProvider.connect(); // Might prompt user
+                console.log("solanaProvider.connect() response:", connectionResponse);
                 publicKey = connectionResponse?.publicKey || solanaProvider.publicKey;
             } catch (connectError) {
-                console.error("Error connecting to Solana wallet:", connectError);
+                console.error("Error connecting to Solana wallet via provider.connect():", connectError);
                 statusMessageDiv.innerHTML = `<p>Error connecting to wallet.</p>`;
                 contentDiv.innerHTML = `<p>${connectError.message}. You might need to approve the connection in your Farcaster client.</p>`;
                 return null;
             }
+        } else {
+            console.warn("Solana provider has no publicKey and no connect method. Unable to get publicKey.");
         }
 
         if (!publicKey) {
             console.error("Could not get publicKey from Solana provider.");
             statusMessageDiv.innerHTML = '<p>Error: Could not get public key.</p>';
-            contentDiv.innerHTML = '<p>Wallet might not be connected or approved. Please check your Farcaster client.</p>';
+            contentDiv.innerHTML = '<p>Wallet might not be connected or approved. Check your Farcaster client and debug console.</p>';
             return null;
         }
         
         const publicKeyBs58 = bs58.encode(publicKey.toBytes());
-        console.log("Connected with publicKey:", publicKeyBs58);
+        console.log("Successfully obtained publicKey:", publicKeyBs58);
         statusMessageDiv.innerHTML = `<p>Wallet connected: ${publicKeyBs58.slice(0,4)}...${publicKeyBs58.slice(-4)}. Signing message...</p>`;
 
         const messageString = "farcaster-crush-v1";
         const message = new TextEncoder().encode(messageString);
+        console.log(`Attempting to sign message: "${messageString}"`);
         const signedMessageResult = await solanaProvider.signMessage(message, "utf8");
+        console.log("signMessage result:", signedMessageResult);
         
         let signature;
         if (signedMessageResult && signedMessageResult.signature instanceof Uint8Array) {
@@ -308,29 +316,30 @@ async function connectAndSign() {
         } else if (signedMessageResult instanceof Uint8Array) {
             signature = signedMessageResult; 
         } else {
-            console.error("Unexpected signature format:", signedMessageResult);
+            console.error("Unexpected signature format from signMessage:", signedMessageResult);
             statusMessageDiv.innerHTML = '<p>Error: Unexpected signature format.</p>';
             contentDiv.innerHTML = '<p>Received an unexpected signature format from the wallet.</p>';
             return null;
         }
 
         if (signature.length !== 64) {
-            console.warn(`Expected signature length 64, got ${signature.length}. Proceeding, but this might be an issue.`);
+            console.warn(`Expected signature length 64 from signMessage, got ${signature.length}.`);
         }
 
         const kWallet = sha256(signature);
         sessionKWallet = kWallet;
-        sessionPublicKey = publicKey;
+        sessionPublicKey = publicKey; // Store the actual PublicKey object
 
         console.log('Raw signature (first 16 bytes hex):', bytesToHex(signature.slice(0,16)));
         console.log('kWallet (hex, first 8 bytes):', bytesToHex(kWallet.slice(0,8)));
         
         statusMessageDiv.innerHTML = `<p>Successfully signed message and derived kWallet!</p>`;
         
-        // Update UI to show search input instead of follow list message
         contentDiv.innerHTML = `
             <p>Your Public Key: ${publicKeyBs58}</p>
             <p>kWallet derived. You can now search for a user to send a secret crush.</p>
+            <p><small>Raw Signature (first 16B hex): ${bytesToHex(signature.slice(0,16))}</small></p>
+            <p><small>kWallet (first 8B hex): ${bytesToHex(kWallet.slice(0,8))}</small></p>
             <input type="text" id="userSearchInput" placeholder="Search Farcaster users...">
             <div id="searchResults"></div>
         `;
@@ -344,19 +353,17 @@ async function connectAndSign() {
         return { kWallet, publicKey };
 
     } catch (error) {
-        console.error("Error in connectAndSign:", error);
+        console.error("Error in connectAndSign process:", error);
         statusMessageDiv.innerHTML = `<p>Error: ${error.message}.</p>`;
-        contentDiv.innerHTML = `<p>See console for more details. Ensure your Farcaster wallet is set up and active.</p>`;
+        contentDiv.innerHTML = `<p>See debug console for more details. Ensure your Farcaster wallet is set up and active.</p>`;
         return null;
     }
 }
 
-// Initialize application
 function initializeApp() {
-    // Call initDebugConsole early
-    if (document.readyState === 'loading') { // DOMContentLoaded may be too late if script is at end of body
+    if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', initDebugConsole);
-    } else { // DOM is already ready
+    } else {
         initDebugConsole();
     }
 
@@ -364,22 +371,16 @@ function initializeApp() {
     if (appDiv) {
         appDiv.innerHTML = `
             <h1>Encrypted Mutual Match</h1>
-            <div id="statusMessage"><p>Connect your wallet to begin.</p></div>
+            <div id="statusMessage"><p>App Initialized. Farcaster SDK loading...</p></div>
             <button id="connectWalletBtn">Connect Wallet & Sign</button>
             <div id="content">
-                <!-- Dynamic content will go here: follow list, crush status, etc. -->
+                <p>Please wait for Farcaster SDK to be ready.</p>
             </div>
         `;
         const connectButton = document.getElementById('connectWalletBtn');
         if (connectButton) {
-            connectButton.addEventListener('click', async () => {
-                const result = await connectAndSign(); // connectAndSign now updates the UI directly
-                if (result && result.kWallet && result.publicKey) {
-                    console.log("kWallet and PublicKey obtained. Search UI is now active.");
-                }
-            });
+            connectButton.addEventListener('click', connectAndSign);
         }
-        document.getElementById('content').innerHTML = '<p>Please connect your wallet and sign the message to start.</p>';
     } else {
         console.error("Could not find #app element in HTML.");
     }
@@ -388,7 +389,45 @@ function initializeApp() {
 initializeApp();
 
 document.addEventListener('DOMContentLoaded', async () => {
-    await frame.sdk.actions.ready()
+    console.log("DOMContentLoaded event fired. Farcaster SDK (frame.sdk):", frame.sdk);
+    const statusMessageDiv = document.getElementById('statusMessage');
+    const contentDiv = document.getElementById('content');
+
+    try {
+        if (statusMessageDiv) statusMessageDiv.innerHTML = "<p>Farcaster SDK actions.ready()...</p>";
+        await frame.sdk.actions.ready();
+        console.log("Farcaster SDK is ready (frame.sdk.actions.ready() resolved).");
+        if (statusMessageDiv) statusMessageDiv.innerHTML = "<p>Farcaster SDK Ready. Checking for Solana Provider...</p>";
+
+        console.log("Attempting to get Solana provider from frame.sdk.experimental...");
+        console.log("frame.sdk.experimental object:", frame.sdk?.experimental);
+        if (frame.sdk && frame.sdk.experimental && typeof frame.sdk.experimental.getSolanaProvider === 'function') {
+            solanaProvider = await frame.sdk.experimental.getSolanaProvider();
+            console.log("Initial Solana Provider object (after await):", solanaProvider);
+            if (solanaProvider) {
+                if (statusMessageDiv) statusMessageDiv.innerHTML = "<p>Solana Provider found! Ready to connect & sign.</p>";
+                if (contentDiv) contentDiv.innerHTML = "<p>Click 'Connect Wallet & Sign' to proceed.</p>";
+                 if(solanaProvider.publicKey) {
+                    console.log("Solana provider has initial publicKey:", solanaProvider.publicKey.toString());
+                }
+                if(typeof solanaProvider.isConnected === 'boolean') {
+                     console.log("Solana provider isConnected status:", solanaProvider.isConnected);
+                }
+            } else {
+                console.error("await frame.sdk.experimental.getSolanaProvider() returned null or undefined.");
+                if (statusMessageDiv) statusMessageDiv.innerHTML = "<p>Error: Solana Provider not available.</p>";
+                if (contentDiv) contentDiv.innerHTML = "<p>Could not initialize Solana Wallet Provider. Check debug console.</p>";
+            }
+        } else {
+            console.error("frame.sdk.experimental.getSolanaProvider is not a function or experimental is not available.");
+            if (statusMessageDiv) statusMessageDiv.innerHTML = "<p>Error: Solana Provider API not found in SDK.</p>";
+            if (contentDiv) contentDiv.innerHTML = "<p>Farcaster SDK version might not support the required Solana provider API. Check debug console.</p>";
+        }
+    } catch (error) {
+        console.error("Error during Farcaster SDK ready/provider init:", error);
+        if (statusMessageDiv) statusMessageDiv.innerHTML = "<p>Error initializing Farcaster SDK features.</p>";
+        if (contentDiv) contentDiv.innerHTML = "<p>An error occurred. See debug console.</p>";
+    }
 });
 
 // Further steps from PRD section 4.2 (Front-End Requirements - Key steps per crush)
