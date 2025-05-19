@@ -402,28 +402,28 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         console.log("Attempting to get Solana provider from frame.sdk.experimental...");
         console.log("frame.sdk.experimental object:", frame.sdk?.experimental);
-        if (frame.sdk && frame.sdk.experimental && typeof frame.sdk.experimental.getSolanaProvider === 'function') {
-            // solanaProvider = await frame.sdk.experimental.getSolanaProvider();
-            // console.log("Initial Solana Provider object (after await):", solanaProvider);
-            // if (solanaProvider) {
-            //     if (statusMessageDiv) statusMessageDiv.innerHTML = "<p>Solana Provider found! Ready to connect & sign.</p>";
-            //     if (contentDiv) contentDiv.innerHTML = "<p>Click 'Connect Wallet & Sign' to proceed.</p>";
-            //      if(solanaProvider.publicKey) {
-            //         console.log("Solana provider has initial publicKey:", solanaProvider.publicKey.toString());
-            //     }
-            //     if(typeof solanaProvider.isConnected === 'boolean') {
-            //          console.log("Solana provider isConnected status:", solanaProvider.isConnected);
-            //     }
-            // } else {
-            //     console.error("await frame.sdk.experimental.getSolanaProvider() returned null or undefined.");
-            //     if (statusMessageDiv) statusMessageDiv.innerHTML = "<p>Error: Solana Provider not available.</p>";
-            //     if (contentDiv) contentDiv.innerHTML = "<p>Could not initialize Solana Wallet Provider. Check debug console.</p>";
-            // }
-        } else {
-            console.error("frame.sdk.experimental.getSolanaProvider is not a function or experimental is not available.");
-            if (statusMessageDiv) statusMessageDiv.innerHTML = "<p>Error: Solana Provider API not found in SDK.</p>";
-            if (contentDiv) contentDiv.innerHTML = "<p>Farcaster SDK version might not support the required Solana provider API. Check debug console.</p>";
-        }
+        // if (frame.sdk && frame.sdk.experimental && typeof frame.sdk.experimental.getSolanaProvider === 'function') {
+        //     // solanaProvider = await frame.sdk.experimental.getSolanaProvider();
+        //     // console.log("Initial Solana Provider object (after await):", solanaProvider);
+        //     // if (solanaProvider) {
+        //     //     if (statusMessageDiv) statusMessageDiv.innerHTML = "<p>Solana Provider found! Ready to connect & sign.</p>";
+        //     //     if (contentDiv) contentDiv.innerHTML = "<p>Click 'Connect Wallet & Sign' to proceed.</p>";
+        //     //      if(solanaProvider.publicKey) {
+        //     //         console.log("Solana provider has initial publicKey:", solanaProvider.publicKey.toString());
+        //     //     }
+        //     //     if(typeof solanaProvider.isConnected === 'boolean') {
+        //     //          console.log("Solana provider isConnected status:", solanaProvider.isConnected);
+        //     //     }
+        //     // } else {
+        //     //     console.error("await frame.sdk.experimental.getSolanaProvider() returned null or undefined.");
+        //     //     if (statusMessageDiv) statusMessageDiv.innerHTML = "<p>Error: Solana Provider not available.</p>";
+        //     //     if (contentDiv) contentDiv.innerHTML = "<p>Could not initialize Solana Wallet Provider. Check debug console.</p>";
+        //     // }
+        // } else {
+        //     console.error("frame.sdk.experimental.getSolanaProvider is not a function or experimental is not available.");
+        //     if (statusMessageDiv) statusMessageDiv.innerHTML = "<p>Error: Solana Provider API not found in SDK.</p>";
+        //     if (contentDiv) contentDiv.innerHTML = "<p>Farcaster SDK version might not support the required Solana provider API. Check debug console.</p>";
+        // }
     } catch (error) {
         console.error("Error during Farcaster SDK ready/provider init:", error);
         if (statusMessageDiv) statusMessageDiv.innerHTML = "<p>Error initializing Farcaster SDK features.</p>";
