@@ -253,6 +253,9 @@ async function connectAndSign() {
     // frame.sdk and solanaProvider are now logged earlier (on DOMContentLoaded)
     // We will use the module-scoped solanaProvider here.
 
+    console.log("frame.sdk:", frame.sdk);
+    console.log("frame.sdk.experimental:", frame.sdk.experimental);
+
     const contentDiv = document.getElementById('content');
     const statusMessageDiv = document.getElementById('statusMessage');
 
