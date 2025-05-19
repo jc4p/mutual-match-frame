@@ -309,14 +309,51 @@ async function connectAndSign() {
         console.log("signMessage result:", signedMessageResult);
         
         let signature;
-        if (signedMessageResult && typeof signedMessageResult.signature === 'string') {
+        const signatureString = signedMessageResult.signature;
+
+        if (signedMessageResult && typeof signatureString === 'string') {
+            let decodedSuccessfully = false;
+
+            // Attempt 1: Decode as Base58
             try {
-                signature = bs58.decode(signedMessageResult.signature);
-                if (signature.length === 0) throw new Error("Decoded signature is empty (was it a valid Base58 string?)");
-            } catch (e) {
-                 console.error("Failed to decode Base58 string signature:", e, "Original string:", signedMessageResult.signature);
+                const decodedBs58 = bs58.decode(signatureString);
+                if (decodedBs58.length === 64) {
+                    signature = decodedBs58;
+                    decodedSuccessfully = true;
+                    console.log("Successfully decoded signature as Base58.");
+                } else {
+                    console.warn(`Base58 decoded signature has length ${decodedBs58.length}, expected 64. Will try Base64.`);
+                }
+            } catch (bs58Error) {
+                // Log lightly, as this might just be a Base64 string
+                console.log("Could not decode signature as Base58, trying Base64. (BS58 Error: ", bs58Error.message, ")");
+            }
+
+            // Attempt 2: Decode as Base64 (if Base58 failed or was wrong length)
+            if (!decodedSuccessfully) {
+                try {
+                    const binaryString = atob(signatureString);
+                    const bytes = new Uint8Array(binaryString.length);
+                    for (let i = 0; i < binaryString.length; i++) {
+                        bytes[i] = binaryString.charCodeAt(i);
+                    }
+
+                    if (bytes.length === 64) {
+                        signature = bytes;
+                        decodedSuccessfully = true;
+                        console.log("Successfully decoded signature as Base64.");
+                    } else {
+                        console.error(`Base64 decoded signature has length ${bytes.length}, expected 64. Original string: ${signatureString}`);
+                    }
+                } catch (b64Error) {
+                    console.error("Failed to decode signature as Base64 after Base58 attempt. Error:", b64Error.message, "Original string:", signatureString);
+                }
+            }
+
+            if (!decodedSuccessfully) {
+                 console.error("Could not decode signature as Base58 or Base64 to a 64-byte array. Original string:", signatureString);
                  statusMessageDiv.innerHTML = '<p>Error: Could not decode signature.</p>';
-                 contentDiv.innerHTML = '<p>The signature format from the wallet was an undecodable string (expected Base58).</p>';
+                 contentDiv.innerHTML = '<p>The signature format from the wallet was undecodable or incorrect length.</p>';
                  return null;
             }
         } else {
@@ -332,9 +369,10 @@ async function connectAndSign() {
              return null;
         }
         // The PRD implies a 64-byte signature is standard for Ed25519.
-        if (signature.length !== 64) {
-            console.warn(`Expected signature length 64 from signMessage, got ${signature.length}. This might affect kWallet derivation if HMAC expects a specific key length.`);
-        }
+        // This check is now handled during the decoding attempts above.
+        // if (signature.length !== 64) {
+        //     console.warn(`Expected signature length 64 from signMessage, got ${signature.length}. This might affect kWallet derivation if HMAC expects a specific key length.`);
+        // }
 
         const kWallet = sha256(signature);
         sessionKWallet = kWallet;
