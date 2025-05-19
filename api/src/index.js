@@ -45,7 +45,7 @@ app.get('/api/search-users', async (c) => {
 			method: 'GET',
 			headers: {
 				'Accept': 'application/json',
-				'api_key': NEYNAR_API_KEY, // Corrected header name based on typical Neynar usage
+				'x-api-key': NEYNAR_API_KEY
 			},
 		});
 
