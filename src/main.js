@@ -4,6 +4,10 @@ import { sha256 } from '@noble/hashes/sha2';
 import { bytesToHex } from '@noble/hashes/utils';
 import bs58 from 'bs58';
 
+const API_ROOT = 'https://mutual-match-api.kasra.codes';
+
+console.log("Encrypted Mutual Match App Initializing...");
+
 // User Flow (from PRD 3):
 // 1. Open Mini-App -> wallet prompt appears once -> user signs constant "farcaster-crush-v1".
 
@@ -36,10 +40,9 @@ async function searchUsers(query) {
     resultsDiv.innerHTML = '<p>Searching...</p>';
 
     try {
-        // Assuming your Cloudflare worker (api/src/index.js) is served at the same origin or proxied
-        // If it's on a different port during local dev (e.g. 8787 for worker, 5173 for vite dev server)
-        // you might need to use the full URL e.g. http://localhost:8787/api/search-users
-        const response = await fetch(`/api/search-users?q=${encodeURIComponent(query)}`);
+        const apiUrl = `${API_ROOT}/api/search-users?q=${encodeURIComponent(query)}`;
+        console.log(`Fetching from: ${apiUrl}`); // Log the URL for debugging
+        const response = await fetch(apiUrl);
         if (!response.ok) {
             const errData = await response.json();
             console.error("Search API error:", errData);
@@ -85,7 +88,7 @@ async function searchUsers(query) {
                         username: item.dataset.username,
                         display_name: item.dataset.displayname,
                         pfp_url: item.dataset.pfpurl,
-                        primary_sol_address: primarySolAddress // This is our edPubTarget
+                        primary_sol_address: primarySolAddress
                     };
                     console.log("Selected target user:", selectedTargetUser);
                     resultsDiv.innerHTML = `
@@ -94,7 +97,7 @@ async function searchUsers(query) {
                         <p>Ready to derive stealth key and proceed.</p>
                         <button id="sendCrushBtn">Send Secret Crush</button>
                     `;
-                    document.getElementById('userSearchInput').value = ''; // Clear search input
+                    document.getElementById('userSearchInput').value = '';
                     document.getElementById('sendCrushBtn').addEventListener('click', handleSendCrush);
                 });
             });
