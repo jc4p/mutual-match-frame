@@ -388,7 +388,6 @@ function initializeApp() {
     const appDiv = document.getElementById('app');
     if (appDiv) {
         appDiv.innerHTML = `
-            <h1>Encrypted Mutual Match</h1>
             <div id="statusMessage"><p>App Initialized. Farcaster SDK loading...</p></div>
             <button id="connectWalletBtn">Connect Wallet & Sign</button>
             <div id="content">
