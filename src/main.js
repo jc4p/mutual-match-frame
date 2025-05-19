@@ -249,8 +249,6 @@ const debouncedSearchUsers = debounce(searchUsers, 300);
 // Placeholder for wallet interaction and signing
 async function connectAndSign() {
     console.log("--- connectAndSign called ---");
-    console.log("frame.sdk:", frame.sdk);
-    console.log("frame.sdk.experimental:", frame.sdk?.experimental);
 
     const contentDiv = document.getElementById('content');
     const statusMessageDiv = document.getElementById('statusMessage');
@@ -263,15 +261,7 @@ async function connectAndSign() {
 
     let solanaProvider = null;
     try {
-        if (frame.sdk && frame.sdk.experimental && typeof frame.sdk.experimental.getSolanaProvider === 'function') {
-            solanaProvider = await frame.sdk.experimental.getSolanaProvider();
-            console.log("Solana Provider object (from connectAndSign after await):", solanaProvider);
-        } else {
-            console.error("frame.sdk.experimental.getSolanaProvider is not a function or sdk.experimental is not available.");
-            statusMessageDiv.innerHTML = '<p>Error: Solana Provider API not found in SDK.</p>';
-            contentDiv.innerHTML = '<p>Farcaster SDK version might not support the required Solana provider API. Check debug console.</p>';
-            return null;
-        }
+        solanaProvider = await frame.sdk.experimental.getSolanaProvider();
 
         if (!solanaProvider) {
             console.error("await frame.sdk.experimental.getSolanaProvider() returned null or undefined.");
@@ -417,14 +407,12 @@ function initializeApp() {
 initializeApp();
 
 document.addEventListener('DOMContentLoaded', async () => {
-    console.log("DOMContentLoaded event fired. Initial Farcaster SDK (frame.sdk):", frame.sdk);
     const statusMessageDiv = document.getElementById('statusMessage');
     const contentDiv = document.getElementById('content');
     
     try {
         if (statusMessageDiv) statusMessageDiv.innerHTML = "<p>Farcaster SDK: Waiting for actions.ready()...</p>";
         await frame.sdk.actions.ready();
-        console.log("Farcaster SDK is ready (frame.sdk.actions.ready() resolved). Current frame.sdk:", frame.sdk);
         if (statusMessageDiv) statusMessageDiv.innerHTML = "<p>Farcaster SDK Ready.</p>";
         if (contentDiv) contentDiv.innerHTML = "<p>Please click 'Connect Wallet & Sign' to begin.</p>";
 
