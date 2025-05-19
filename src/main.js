@@ -193,11 +193,11 @@ async function searchUsers(query) {
                      data-pfpurl="${user.pfp_url}"
                      data-primarysoladdress="${user.primary_sol_address || ''}">
                     <img src="${user.pfp_url}" alt="${user.username}" width="40" height="40" style="border-radius: 50%; margin-right: 10px;">
-                    <div>
+  <div>
                         <strong>${user.display_name}</strong> (@${user.username})<br>
                         <small>FID: ${user.fid}${user.primary_sol_address ? ' (SOL verified)' : ' (No primary SOL)'}</small>
                     </div>
-                </div>
+    </div>
             `).join('');
 
             document.querySelectorAll('.search-result-item').forEach(item => {
@@ -249,6 +249,8 @@ const debouncedSearchUsers = debounce(searchUsers, 300);
 // Placeholder for wallet interaction and signing
 async function connectAndSign() {
     console.log("--- connectAndSign called ---");
+    console.log("frame.sdk:", frame.sdk);
+    console.log("frame.sdk.experimental:", frame.sdk?.experimental);
 
     const contentDiv = document.getElementById('content');
     const statusMessageDiv = document.getElementById('statusMessage');
@@ -259,9 +261,17 @@ async function connectAndSign() {
     }
     statusMessageDiv.innerHTML = "<p>Attempting to get Solana Provider...</p>";
 
-    let solanaProvider = null; // Declare locally
+    let solanaProvider = null;
     try {
-        solanaProvider = await frame.sdk.experimental.getSolanaProvider();
+        if (frame.sdk && frame.sdk.experimental && typeof frame.sdk.experimental.getSolanaProvider === 'function') {
+            solanaProvider = await frame.sdk.experimental.getSolanaProvider();
+            console.log("Solana Provider object (from connectAndSign after await):", solanaProvider);
+        } else {
+            console.error("frame.sdk.experimental.getSolanaProvider is not a function or sdk.experimental is not available.");
+            statusMessageDiv.innerHTML = '<p>Error: Solana Provider API not found in SDK.</p>';
+            contentDiv.innerHTML = '<p>Farcaster SDK version might not support the required Solana provider API. Check debug console.</p>';
+            return null;
+        }
 
         if (!solanaProvider) {
             console.error("await frame.sdk.experimental.getSolanaProvider() returned null or undefined.");
@@ -272,26 +282,31 @@ async function connectAndSign() {
         
         statusMessageDiv.innerHTML = "<p>Solana Provider found! Connecting to wallet...</p>";
 
-        // publicKey acquisition, signing etc.
-        let publicKey;
-        const connectionResponse = await solanaProvider.request({
-            method: 'connect',
-        });
-        console.log("solanaProvider.request() response:", connectionResponse);
+        let publicKeyString; // Expecting a string directly based on logs
+        try {
+            console.log("Attempting solanaProvider connect...");
+            statusMessageDiv.innerHTML = "<p>Awaiting wallet connection approval...</p>";
+            const connectionResponse = await solanaProvider.request({ method: 'connect' });
+            console.log("solanaProvider connect response:", connectionResponse);
+            publicKeyString = connectionResponse?.publicKey
+            console.log('publicKeyString:', publicKeyString);
+        } catch (connectError) {
+            console.error("Error connecting to Solana wallet via provider connect:", connectError);
+            statusMessageDiv.innerHTML = `<p>Error connecting to wallet.</p>`;
+            contentDiv.innerHTML = `<p>${connectError.message}. You might need to approve the connection.</p>`;
+            return null;
+        }
 
-        publicKey = connectionResponse?.publicKey;
-        console.log("publicKey:", publicKey);
-
-        if (!publicKey) {
-            console.error("Could not get publicKey from Solana provider.");
-            statusMessageDiv.innerHTML = '<p>Error: Could not get public key.</p>';
-            contentDiv.innerHTML = '<p>Wallet might not be connected or approved. Check your Farcaster client and debug console.</p>';
+        if (!publicKeyString || typeof publicKeyString !== 'string') {
+            console.error("Could not get publicKey as a string from Solana provider. Received:", publicKeyString);
+            statusMessageDiv.innerHTML = '<p>Error: Could not get public key string.</p>';
+            contentDiv.innerHTML = '<p>Wallet might not be connected/approved or provider returned unexpected format. Check debug console.</p>';
             return null;
         }
         
-        const publicKeyBs58 = bs58.encode(publicKey.toBytes());
-        console.log("Successfully obtained publicKey:", publicKeyBs58);
-        statusMessageDiv.innerHTML = `<p>Wallet connected: ${publicKeyBs58.slice(0,4)}...${publicKeyBs58.slice(-4)}. Signing message...</p>`;
+        // publicKeyString is already a base58 string, no need for .toBytes() or bs58.encode()
+        console.log("Successfully obtained publicKey string:", publicKeyString);
+        statusMessageDiv.innerHTML = `<p>Wallet connected: ${publicKeyString.slice(0,4)}...${publicKeyString.slice(-4)}. Signing message...</p>`;
 
         const messageString = "farcaster-crush-v1";
         const message = new TextEncoder().encode(messageString);
@@ -302,22 +317,46 @@ async function connectAndSign() {
         let signature;
         if (signedMessageResult && signedMessageResult.signature instanceof Uint8Array) {
             signature = signedMessageResult.signature;
-        } else if (signedMessageResult instanceof Uint8Array) {
+        } else if (signedMessageResult instanceof Uint8Array) { // If signMessage directly returns Uint8Array
             signature = signedMessageResult; 
+        } else if (signedMessageResult && typeof signedMessageResult.signature === 'string') {
+            // Handle if signature is a base64 or hex string from provider (needs decoding)
+            // This is an assumption; adapt if provider returns string signature differently
+            console.warn("Signature from provider is a string, attempting to decode (assuming base64 for now).");
+            try {
+                // Assuming it might be base64 encoded string of the signature bytes
+                const decodedString = atob(signedMessageResult.signature);
+                signature = new Uint8Array(decodedString.length);
+                for (let i = 0; i < decodedString.length; i++) {
+                    signature[i] = decodedString.charCodeAt(i);
+                }
+                if (signature.length === 0) throw new Error("Decoded signature is empty (was it base64?)");
+            } catch (e) {
+                 console.error("Failed to decode string signature:", e, "Original string:", signedMessageResult.signature);
+                 statusMessageDiv.innerHTML = '<p>Error: Could not decode signature.</p>';
+                 contentDiv.innerHTML = '<p>The signature format from the wallet was an undecodable string.</p>';
+                 return null;
+            }
         } else {
             console.error("Unexpected signature format from signMessage:", signedMessageResult);
             statusMessageDiv.innerHTML = '<p>Error: Unexpected signature format.</p>';
-            contentDiv.innerHTML = '<p>Received an unexpected signature format from the wallet.</p>';
+            contentDiv.innerHTML = '<p>Received an unexpected signature format from the wallet for the message signature.</p>';
             return null;
         }
 
+        if (!signature || signature.length === 0) {
+             console.error("Signature is null or empty after processing.");
+             statusMessageDiv.innerHTML = '<p>Error: Signature processing failed.</p>';
+             return null;
+        }
+        // The PRD implies a 64-byte signature is standard for Ed25519.
         if (signature.length !== 64) {
-            console.warn(`Expected signature length 64 from signMessage, got ${signature.length}.`);
+            console.warn(`Expected signature length 64 from signMessage, got ${signature.length}. This might affect kWallet derivation if HMAC expects a specific key length.`);
         }
 
         const kWallet = sha256(signature);
         sessionKWallet = kWallet;
-        sessionPublicKey = publicKey;
+        sessionPublicKey = publicKeyString; // Store the string directly
 
         console.log('Raw signature (first 16 bytes hex):', bytesToHex(signature.slice(0,16)));
         console.log('kWallet (hex, first 8 bytes):', bytesToHex(kWallet.slice(0,8)));
@@ -325,7 +364,7 @@ async function connectAndSign() {
         statusMessageDiv.innerHTML = `<p>Successfully signed message and derived kWallet!</p>`;
         
         contentDiv.innerHTML = `
-            <p>Your Public Key: ${publicKeyBs58}</p>
+            <p>Your Public Key: ${publicKeyString}</p>
             <p>kWallet derived. You can now search for a user to send a secret crush.</p>
             <p><small>Raw Signature (first 16B hex): ${bytesToHex(signature.slice(0,16))}</small></p>
             <p><small>kWallet (first 8B hex): ${bytesToHex(kWallet.slice(0,8))}</small></p>
@@ -339,7 +378,7 @@ async function connectAndSign() {
         const connectButton = document.getElementById('connectWalletBtn');
         if(connectButton) connectButton.style.display = 'none';
 
-        return { kWallet, publicKey };
+        return { kWallet, publicKey: publicKeyString }; // Return string publicKey
 
     } catch (error) {
         console.error("Error in connectAndSign process:", error);
@@ -359,11 +398,12 @@ function initializeApp() {
     const appDiv = document.getElementById('app');
     if (appDiv) {
         appDiv.innerHTML = `
+            <h1>Encrypted Mutual Match</h1>
             <div id="statusMessage"><p>App Initialized. Farcaster SDK loading...</p></div>
             <button id="connectWalletBtn">Connect Wallet & Sign</button>
             <div id="content">
                 <p>Please wait for Farcaster SDK to be ready, then click the button.</p>
-            </div>
+  </div>
         `;
         const connectButton = document.getElementById('connectWalletBtn');
         if (connectButton) {
@@ -377,12 +417,14 @@ function initializeApp() {
 initializeApp();
 
 document.addEventListener('DOMContentLoaded', async () => {
+    console.log("DOMContentLoaded event fired. Initial Farcaster SDK (frame.sdk):", frame.sdk);
     const statusMessageDiv = document.getElementById('statusMessage');
     const contentDiv = document.getElementById('content');
     
     try {
         if (statusMessageDiv) statusMessageDiv.innerHTML = "<p>Farcaster SDK: Waiting for actions.ready()...</p>";
         await frame.sdk.actions.ready();
+        console.log("Farcaster SDK is ready (frame.sdk.actions.ready() resolved). Current frame.sdk:", frame.sdk);
         if (statusMessageDiv) statusMessageDiv.innerHTML = "<p>Farcaster SDK Ready.</p>";
         if (contentDiv) contentDiv.innerHTML = "<p>Please click 'Connect Wallet & Sign' to begin.</p>";
 
