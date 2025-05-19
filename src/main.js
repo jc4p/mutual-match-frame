@@ -8,6 +8,140 @@ const API_ROOT = 'https://mutual-match-api.kasra.codes';
 
 console.log("Encrypted Mutual Match App Initializing...");
 
+// --- Debug Console Start ---
+let debugConsoleVisible = true;
+const originalConsole = {
+    log: console.log.bind(console),
+    warn: console.warn.bind(console),
+    error: console.error.bind(console),
+};
+
+function addLogToDebugConsole(message, level = 'log') {
+    const consoleContent = document.getElementById('debug-console-content');
+    if (consoleContent) {
+        const entry = document.createElement('div');
+        entry.classList.add('debug-entry', `debug-${level}`);
+        
+        let displayMessage = message;
+        if (typeof message === 'object') {
+            try {
+                displayMessage = JSON.stringify(message, (key, value) =>
+                    typeof value === 'bigint' ? value.toString() + 'n' : // Convert BigInts for JSON.stringify
+                    value instanceof Uint8Array ? `Uint8Array(${value.length})[${bytesToHex(value.slice(0,16))}...]` :
+                    value,
+                2);
+            } catch (e) {
+                displayMessage = '[Unserializable Object]';
+            }
+        }
+        entry.textContent = `[${new Date().toLocaleTimeString()}] [${level.toUpperCase()}] ${displayMessage}`;
+        consoleContent.appendChild(entry);
+        consoleContent.scrollTop = consoleContent.scrollHeight; // Auto-scroll
+    }
+}
+
+console.log = function(...args) {
+    originalConsole.log(...args);
+    addLogToDebugConsole(args.length === 1 ? args[0] : args, 'log');
+};
+console.warn = function(...args) {
+    originalConsole.warn(...args);
+    addLogToDebugConsole(args.length === 1 ? args[0] : args, 'warn');
+};
+console.error = function(...args) {
+    originalConsole.error(...args);
+    addLogToDebugConsole(args.length === 1 ? args[0] : args, 'error');
+};
+
+function initDebugConsole() {
+    const style = document.createElement('style');
+    style.textContent = `
+        #debug-console-floater {
+            position: fixed;
+            bottom: 10px;
+            right: 10px;
+            width: 350px;
+            max-height: 250px;
+            background-color: rgba(0,0,0,0.85);
+            color: white;
+            border: 1px solid #444;
+            border-radius: 5px;
+            font-family: monospace;
+            font-size: 12px;
+            z-index: 9999;
+            display: flex;
+            flex-direction: column;
+            box-shadow: 0 0 10px rgba(0,0,0,0.5);
+        }
+        #debug-console-header {
+            background-color: #333;
+            padding: 5px 8px;
+            cursor: grab;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid #444;
+        }
+        #debug-console-header span { font-weight: bold; }
+        #debug-console-toggle, #debug-console-clear {
+            background: #555;
+            color: white;
+            border: 1px solid #777;
+            border-radius: 3px;
+            padding: 2px 5px;
+            cursor: pointer;
+            margin-left: 5px;
+        }
+        #debug-console-toggle:hover, #debug-console-clear:hover { background: #777; }
+        #debug-console-content {
+            padding: 8px;
+            overflow-y: auto;
+            flex-grow: 1;
+            height: 200px; /* Default height when expanded */
+        }
+        .debug-entry { 
+            padding: 2px 0;
+            border-bottom: 1px dotted #555;
+            word-break: break-all;
+        }
+        .debug-entry:last-child { border-bottom: none; }
+        .debug-warn { color: #ffdd57; }
+        .debug-error { color: #ff3860; }
+        #debug-console-floater.minimized #debug-console-content { display: none; }
+        #debug-console-floater.minimized { max-height: 35px; height: 35px; }
+    `;
+    document.head.appendChild(style);
+
+    const floater = document.createElement('div');
+    floater.id = 'debug-console-floater';
+    floater.innerHTML = `
+        <div id="debug-console-header">
+            <span>Debug Console</span>
+            <div>
+                <button id="debug-console-clear">Clear</button>
+                <button id="debug-console-toggle">Minimize</button>
+            </div>
+        </div>
+        <div id="debug-console-content"></div>
+    `;
+    document.body.appendChild(floater);
+
+    const toggleButton = document.getElementById('debug-console-toggle');
+    toggleButton.addEventListener('click', () => {
+        debugConsoleVisible = !debugConsoleVisible;
+        floater.classList.toggle('minimized', !debugConsoleVisible);
+        toggleButton.textContent = debugConsoleVisible ? 'Minimize' : 'Maximize';
+    });
+
+    document.getElementById('debug-console-clear').addEventListener('click', () => {
+        const consoleContent = document.getElementById('debug-console-content');
+        if (consoleContent) consoleContent.innerHTML = '';
+        addLogToDebugConsole('Console cleared.', 'info');
+    });
+    console.log("Debug console initialized.");
+}
+// --- Debug Console End ---
+
 // User Flow (from PRD 3):
 // 1. Open Mini-App -> wallet prompt appears once -> user signs constant "farcaster-crush-v1".
 
@@ -114,7 +248,10 @@ const debouncedSearchUsers = debounce(searchUsers, 300);
 
 // Placeholder for wallet interaction and signing
 async function connectAndSign() {
-    console.log("Attempting to connect wallet and sign message using Farcaster SDK...");
+    console.log("--- connectAndSign called ---");
+    console.log("Farcaster frame.sdk object:", frame.sdk);
+    console.log("frame.sdk.experimental:", frame.sdk?.experimental);
+
     const contentDiv = document.getElementById('content');
     const statusMessageDiv = document.getElementById('statusMessage');
 
@@ -126,10 +263,11 @@ async function connectAndSign() {
 
     try {
         const solanaProvider = frame.sdk.experimental.getSolanaProvider();
+        console.log("Solana Provider object:", solanaProvider);
         if (!solanaProvider) {
-            console.error("Solana provider not available through Farcaster SDK.");
+            console.error("Solana provider is null or undefined.");
             statusMessageDiv.innerHTML = '<p>Error: Solana wallet provider not found.</p>';
-            contentDiv.innerHTML = '<p>Please ensure your Farcaster client supports this feature and your wallet is connected.</p>';
+            contentDiv.innerHTML = '<p>Please ensure your Farcaster client supports this feature and your wallet is connected. Check debug console for details.</p>';
             return null;
         }
 
@@ -206,7 +344,7 @@ async function connectAndSign() {
         return { kWallet, publicKey };
 
     } catch (error) {
-        console.error("Error during Farcaster signing process:", error);
+        console.error("Error in connectAndSign:", error);
         statusMessageDiv.innerHTML = `<p>Error: ${error.message}.</p>`;
         contentDiv.innerHTML = `<p>See console for more details. Ensure your Farcaster wallet is set up and active.</p>`;
         return null;
@@ -215,6 +353,13 @@ async function connectAndSign() {
 
 // Initialize application
 function initializeApp() {
+    // Call initDebugConsole early
+    if (document.readyState === 'loading') { // DOMContentLoaded may be too late if script is at end of body
+        document.addEventListener('DOMContentLoaded', initDebugConsole);
+    } else { // DOM is already ready
+        initDebugConsole();
+    }
+
     const appDiv = document.getElementById('app');
     if (appDiv) {
         appDiv.innerHTML = `
