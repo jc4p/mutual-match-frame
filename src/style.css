@@ -105,9 +105,15 @@ button:focus-visible {
   border-radius: 8px;
   max-height: 300px; /* Limit height and make scrollable if many results */
   overflow-y: auto;
-  background-color: #fff; /* Ensure background for items */
-  border: 1px solid #ddd; /* Add a border to the container itself */
-  box-shadow: 0 2px 5px rgba(0,0,0,0.1); /* Add a subtle shadow */
+  /* background-color: #fff; */ /* Moved to .populated */
+  border: 1px solid #ddd;
+  /* box-shadow: 0 2px 5px rgba(0,0,0,0.1); */ /* Moved to .populated */
+  transition: box-shadow 0.3s ease-in-out, background-color 0.3s ease-in-out; /* For smooth appearance */
+}
+
+.search-results-container.populated {
+  background-color: #fff;
+  box-shadow: 0 2px 5px rgba(0,0,0,0.1);
 }
 
 .search-result-item {

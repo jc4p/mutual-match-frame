@@ -1,6 +1,11 @@
 import './style.css';
 import * as frame from '@farcaster/frame-sdk';
 import { sha256 } from '@noble/hashes/sha2';
+import { hmac } from '@noble/hashes/hmac';
+import { ed25519 } from '@noble/curves/ed25519';
+import { x25519 } from '@noble/curves/x25519';
+import { concatBytes, randomBytes } from '@noble/hashes/utils'; // For randomBytes (nonce) and concatBytes
+import { xchacha20poly1305 } from '@noble/ciphers/chacha.js'; 
 import { bytesToHex } from '@noble/hashes/utils';
 import bs58 from 'bs58';
 
@@ -174,9 +179,11 @@ async function searchUsers(query) {
     const resultsDiv = document.getElementById('searchResults');
     if (!query || query.length < 2) {
         resultsDiv.innerHTML = '<p><small>Enter at least 2 characters to search.</small></p>';
+        resultsDiv.classList.remove('populated'); // Remove when prompt is shown
         return;
     }
     resultsDiv.innerHTML = '<p>Searching...</p>';
+    resultsDiv.classList.add('populated'); // Add when search starts
 
     try {
         const apiUrl = `${API_ROOT}/api/search-users?q=${encodeURIComponent(query)}`;
@@ -186,10 +193,12 @@ async function searchUsers(query) {
             const errData = await response.json();
             console.error("Search API error:", errData);
             resultsDiv.innerHTML = `<p>Error searching users: ${errData.error || response.statusText}</p>`;
+            resultsDiv.classList.add('populated'); // Ensure populated on error
             return;
         }
         const data = await response.json();
         if (data.users && data.users.length > 0) {
+            resultsDiv.classList.add('populated'); // Ensure populated with results
             resultsDiv.innerHTML = data.users.map(user => `
                 <div class="search-result-item" 
                      data-fid="${user.fid}" 
@@ -214,9 +223,11 @@ async function searchUsers(query) {
                             <p style="color: red;">This user does not have a verified primary Solana address. Cannot proceed with crush.</p>
                             <p><button id="searchAgainBtn">Search Again</button></p>
                         `;
+                        resultsDiv.classList.add('populated'); // Ensure populated
                         document.getElementById('searchAgainBtn').addEventListener('click', () => {
                              document.getElementById('userSearchInput').value = '';
                              resultsDiv.innerHTML = ''; // Clear selection message
+                             resultsDiv.classList.remove('populated'); // Remove on clear
                         });
                         selectedTargetUser = null; // Clear previous selection
                         return;
@@ -232,20 +243,22 @@ async function searchUsers(query) {
                     console.log("Selected target user:", selectedTargetUser);
                     resultsDiv.innerHTML = `
                         <p>Selected: <strong>${selectedTargetUser.display_name}</strong> (@${selectedTargetUser.username})</p>
-                        <p>Target Solana Address (edPubTarget): ${selectedTargetUser.primary_sol_address}</p>
                         <p>Ready to derive stealth key and proceed.</p>
                         <button id="sendCrushBtn">Send Secret Crush</button>
                     `;
+                    resultsDiv.classList.add('populated'); // Ensure populated
                     document.getElementById('userSearchInput').value = '';
                     document.getElementById('sendCrushBtn').addEventListener('click', handleSendCrush);
                 });
             });
         } else {
             resultsDiv.innerHTML = '<p>No users found for that query.</p>';
+            resultsDiv.classList.add('populated'); // Ensure populated for "no users"
         }
     } catch (error) {
         console.error("Failed to fetch or parse search results:", error);
         resultsDiv.innerHTML = '<p>An error occurred while searching. Check console.</p>';
+        resultsDiv.classList.add('populated'); // Ensure populated on error
     }
 }
 
@@ -455,6 +468,146 @@ document.addEventListener('DOMContentLoaded', async () => {
 // npm install @noble/hashes @noble/ed25519 @noble/curves
 // You might need an additional library for XChaCha20-Poly1305.
 
+// --- Crypto Helper Functions ---
+
+// PRD 4.2: Stealth key derivation
+// seed = HMAC-SHA256(kWallet, edPubTargetBytes)
+// sk' = seed
+// pk' = ed25519.getPublicKey(sk')
+async function deriveStealthKey(kWallet, edPubTargetBytes) {
+  console.log("deriveStealthKey: kWallet (hex, first 8B):", bytesToHex(kWallet.slice(0,8)));
+  console.log("deriveStealthKey: edPubTargetBytes (hex, first 8B):", bytesToHex(edPubTargetBytes.slice(0,8)));
+
+  const seed = await hmac(sha256, kWallet, edPubTargetBytes); // HMAC-SHA256
+  const skPrime = seed; // sk' is the seed itself (32 bytes from SHA256)
+  const pkPrime = ed25519.getPublicKey(skPrime);
+
+  console.log("deriveStealthKey: seed / skPrime (hex, first 8B):", bytesToHex(skPrime.slice(0,8)));
+  console.log("deriveStealthKey: pkPrime (hex, first 8B):", bytesToHex(pkPrime.slice(0,8)));
+  
+  if (skPrime.length !== 32) {
+    console.error(`deriveStealthKey: skPrime length is ${skPrime.length}, expected 32.`);
+    throw new Error("Stealth private key (skPrime) is not 32 bytes.");
+  }
+  if (pkPrime.length !== 32) {
+    console.error(`deriveStealthKey: pkPrime length is ${pkPrime.length}, expected 32.`);
+    throw new Error("Stealth public key (pkPrime) is not 32 bytes.");
+  }
+  
+  return { skPrime, pkPrime };
+}
+
+// TODO: PRD 4.2: ECDH
+// convert edPubTarget -> xPubT, xPrivS = edToCurve(sk'), shared = scalarMult(xPrivS,xPubT)
+async function performECDH(skPrimeEd, edPubTargetBytes) {
+  // Convert Ed25519 private key (skPrimeEd) to X25519 private key (scalar)
+  const xPrivS = x25519.edwardsToMontgomeryPriv(skPrimeEd);
+  
+  // Convert Ed25519 public key (edPubTargetBytes) to X25519 public key
+  // Noble's x25519.edwardsToMontgomeryPub expects a point, but edPubTargetBytes is a compressed point (32 bytes)
+  // We first need to ensure edPubTargetBytes is a valid Ed25519 public key.
+  // Then, x25519.getSharedSecret expects the other party's X25519 *public* key.
+  // edwardsToMontgomeryPub will convert the Ed25519 public key to an X25519 public key.
+  const xPubT = x25519.edwardsToMontgomeryPub(edPubTargetBytes);
+
+  console.log("performECDH: xPrivS (scalar, hex, first 8B):", bytesToHex(xPrivS.slice(0,8)));
+  console.log("performECDH: xPubT (X25519 pubkey, hex, first 8B):", bytesToHex(xPubT.slice(0,8)));
+
+  const sharedSecret = await x25519.getSharedSecret(xPrivS, xPubT);
+  
+  console.log("performECDH: sharedSecret (hex, first 8B):", bytesToHex(sharedSecret.slice(0,8)));
+  if (sharedSecret.length !== 32) {
+    console.error(`performECDH: sharedSecret length is ${sharedSecret.length}, expected 32.`);
+    throw new Error("ECDH shared secret is not 32 bytes.");
+  }
+  return sharedSecret;
+}
+
+// TODO: PRD 4.2: Symmetric key & tag
+// K = SHA256(sharedSecret || "pair")
+// tag = SHA256("tag" || K_AB)
+async function deriveSymmetricKeyAndTag(sharedSecret) {
+  const pairSuffix = new TextEncoder().encode("pair");
+  const K_AB = sha256(concatBytes(sharedSecret, pairSuffix));
+
+  const tagPrefix = new TextEncoder().encode("tag");
+  const tag = sha256(concatBytes(tagPrefix, K_AB));
+  
+  console.log("deriveSymmetricKeyAndTag: K_AB (hex, first 8B):", bytesToHex(K_AB.slice(0,8)));
+  console.log("deriveSymmetricKeyAndTag: tag (hex, first 8B):", bytesToHex(tag.slice(0,8)));
+
+  if (K_AB.length !== 32) throw new Error("Symmetric key K_AB is not 32 bytes.");
+  if (tag.length !== 32) throw new Error("Tag is not 32 bytes.");
+  
+  return { K_AB, tag };
+}
+
+// TODO: PRD 4.2: Encrypt payload
+// XChaCha20-Poly1305; nonce=24 B. Payload = two FIDs + optional note
+async function encryptPayload(K_AB, myFid, targetFid, note = "") {
+  // Payload: two FIDs (assuming they are numbers, convert to a fixed-size byte representation, e.g., 8 bytes each for u64)
+  // For simplicity, let's assume FIDs fit in 4 bytes (Uint32) for now.
+  // PRD doesn't specify FID byte representation, adjust if needed.
+  const myFidBytes = new Uint8Array(new Uint32Array([myFid]).buffer); // 4 bytes
+  const targetFidBytes = new Uint8Array(new Uint32Array([targetFid]).buffer); // 4 bytes
+  const noteBytes = new TextEncoder().encode(note); // Variable length
+
+  const payload = concatBytes(myFidBytes, targetFidBytes, noteBytes);
+  const nonce = randomBytes(24); // XChaCha20-Poly1305 uses a 24-byte nonce
+
+  const cipher = xchacha20poly1305(K_AB, nonce); // Initialize cipher with key and nonce
+  const encryptedPayload = cipher.encrypt(payload); // Encrypt the data
+
+  // The result includes the ciphertext and the Poly1305 tag.
+  // For transmission, we need to send nonce + encryptedPayload (which includes the tag)
+  // The PRD cipher field is 112 bytes: 24 (nonce) + payload (e.g. 4+4+X for FIDs+note) + 16 (Poly1305 tag).
+  // If payload is myFid(4) + targetFid(4) = 8 bytes. Then 24 + 8 + 16 = 48 bytes.
+  // This implies the "note" might be larger or there's padding, or the 112B is an upper limit.
+  // Let's assume the 112B is the expected size of `cipher` to be stored on-chain.
+  // This means `nonce + encryptedPayload` must be exactly 112 bytes.
+
+  const combinedCiphertext = concatBytes(nonce, encryptedPayload);
+
+  console.log("encryptPayload: myFidBytes (hex):", bytesToHex(myFidBytes));
+  console.log("encryptPayload: targetFidBytes (hex):", bytesToHex(targetFidBytes));
+  console.log("encryptPayload: noteBytes (hex):", bytesToHex(noteBytes));
+  console.log("encryptPayload: payload (hex, first 16B):", bytesToHex(payload.slice(0,16)));
+  console.log("encryptPayload: K_AB (hex, first 8B):", bytesToHex(K_AB.slice(0,8)));
+  console.log("encryptPayload: nonce (hex):", bytesToHex(nonce));
+  console.log("encryptPayload: encryptedPayload (incl. Poly1305 tag, hex, first 16B):", bytesToHex(encryptedPayload.slice(0,16)));
+  console.log("encryptPayload: combinedCiphertext (nonce + encrypted, hex, first 16B):", bytesToHex(combinedCiphertext.slice(0,16)));
+  console.log("encryptPayload: combinedCiphertext length:", combinedCiphertext.length);
+  
+  // PRD states cipher1/cipher2 on chain is [u8;112]
+  if (combinedCiphertext.length > 112) {
+    // This would happen if myFid(4) + targetFid(4) + noteBytes + Poly1305 tag (16) > (112 - 24 (nonce)) = 88 bytes.
+    // So, myFid(4) + targetFid(4) + noteBytes must be <= 72 bytes.
+    // If note is too long, we might need to truncate it or throw an error.
+    console.error(`Encrypted payload (combinedCiphertext) is ${combinedCiphertext.length} bytes, exceeds 112 bytes limit. Note might be too long.`);
+    throw new Error("Encrypted payload exceeds 112 byte limit. Try a shorter note.");
+  }
+  
+  // If it's less than 112, we might need to pad it. The PRD implies a fixed size.
+  // For now, let's return it and handle potential padding/truncation before on-chain submission.
+  // Or, more robustly, ensure the note is constrained such that the total is exactly 112, or error if too large.
+  // Let's assume for now, the note will be short enough. If not, we need a strategy.
+  // If the combinedCiphertext is SHORTER than 112, we'll pad it.
+  let finalCipherForChain = combinedCiphertext;
+  if (combinedCiphertext.length < 112) {
+    console.warn(`Combined ciphertext is ${combinedCiphertext.length} bytes, padding to 112 bytes for on-chain storage.`);
+    finalCipherForChain = new Uint8Array(112);
+    finalCipherForChain.set(combinedCiphertext); // Copies combinedCiphertext to the beginning of the 112-byte array
+  } else if (combinedCiphertext.length > 112) {
+     // This case should be caught by the check above, but as a safeguard:
+    throw new Error("Encrypted payload exceeds 112 byte limit after padding considerations.");
+  }
+
+
+  return finalCipherForChain; 
+}
+
+// --- End Crypto Helper Functions ---
+
 async function handleSendCrush() {
     if (!selectedTargetUser || !selectedTargetUser.primary_sol_address) {
         alert("No target user with a Solana address selected!");
@@ -464,10 +617,25 @@ async function handleSendCrush() {
         alert("kWallet not available. Please connect and sign first.");
         return;
     }
+    // sessionPublicKey is also available if needed for other purposes, but not directly for this crypto flow.
+
+    let myFid;
+    try {
+        const frameContext = await frame.sdk.context();
+        if (!frameContext || typeof frameContext.fid !== 'number') {
+            console.error("Could not get user FID from frame context:", frameContext);
+            alert("Could not determine your Farcaster FID. Unable to send crush.");
+            return;
+        }
+        myFid = frameContext.fid;
+        console.log("User FID from frame context:", myFid);
+    } catch (contextError) {
+        console.error("Error getting frame context:", contextError);
+        alert("Error fetching your Farcaster details. Unable to send crush.");
+        return;
+    }
 
     const edPubTarget = selectedTargetUser.primary_sol_address;
-    // For Solana addresses (bs58 encoded strings), they first need to be decoded to a Uint8Array to be used as a public key.
-    // Noble libraries typically expect Uint8Array for keys.
     let edPubTargetBytes;
     try {
         edPubTargetBytes = bs58.decode(edPubTarget);
@@ -476,7 +644,7 @@ async function handleSendCrush() {
         }
     } catch(e) {
         console.error("Invalid target Solana address (edPubTarget):", edPubTarget, e);
-        alert("The target user\'s Solana address appears invalid. Cannot proceed.");
+        alert("The target user\\'s Solana address appears invalid. Cannot proceed.");
         return;
     }
 
@@ -484,47 +652,84 @@ async function handleSendCrush() {
     console.log("kWallet (first 8B hex):", bytesToHex(sessionKWallet.slice(0,8)));
     console.log("edPubTarget (bs58):", edPubTarget);
     console.log("edPubTarget (bytes, first 8B hex):", bytesToHex(edPubTargetBytes.slice(0,8)));
+    console.log("My FID:", myFid);
+    console.log("Target FID:", selectedTargetUser.fid);
 
-    const statusDiv = document.getElementById('searchResults'); // Reuse searchResults for status
+    const statusDiv = document.getElementById('searchResults'); 
+    const resultsDiv = statusDiv; // for clarity in event listener later
     statusDiv.innerHTML = "<p>Processing your secret crush... Generating keys...</p>";
+    statusDiv.classList.add('populated');
 
-    // PRD 4.2: Key steps per crush
-    // 1. Stealth key derivation: seed = HMAC-SHA256(kWallet, edPubTarget) sk' = seed, pk' = ed25519.getPublicKey(sk')
-    // TODO: Implement with noble libraries
-    // const { skPrime, pkPrime } = await deriveStealthKey(sessionKWallet, edPubTargetBytes);
-    // statusDiv.innerHTML = `<p>Processing... Stealth key derived: ${bytesToHex(pkPrime.slice(0,8))}...</p>`;
+    try {
+        console.log("Step 1: Deriving stealth key...");
+        const { skPrime, pkPrime } = await deriveStealthKey(sessionKWallet, edPubTargetBytes);
+        statusDiv.innerHTML = `<p>Processing... Stealth key derived.</p>`; // Simplified UI message
+        console.log(`  skPrime (hex): ${bytesToHex(skPrime)}, pkPrime (hex): ${bytesToHex(pkPrime)}`);
 
-    // 2. ECDH: convert edPubTarget -> xPubT, xPrivS = edToCurve(sk'), shared = scalarMult(xPrivS,xPubT)
-    // TODO: Implement with noble libraries (requires ed25519-to-x25519 helper, etc.)
-    // const sharedSecret = await performECDH(skPrime, edPubTargetBytes);
-    // statusDiv.innerHTML = `<p>Processing... Shared secret calculated.</p>`;
+        console.log("Step 2: Performing ECDH...");
+        const sharedSecret = await performECDH(skPrime, edPubTargetBytes);
+        statusDiv.innerHTML = `<p>Processing... Shared secret calculated.</p>`;
+        console.log(`  Shared Secret (hex): ${bytesToHex(sharedSecret)}`);
 
-    // 3. Symmetric key & tag: K = SHA256(shared||"pair"), tag = SHA256("tag"||K)
-    // TODO: Implement with noble libraries
-    // const { K_AB, tag } = await deriveSymmetricKeyAndTag(sharedSecret);
-    // statusDiv.innerHTML = `<p>Processing... Symmetric key and tag generated. Tag: ${bytesToHex(tag.slice(0,8))}...</p>`;
+        console.log("Step 3: Deriving symmetric key and tag...");
+        const { K_AB, tag } = await deriveSymmetricKeyAndTag(sharedSecret);
+        statusDiv.innerHTML = `<p>Processing... Symmetric key and tag generated.</p>`;
+        console.log(`  K_AB (hex): ${bytesToHex(K_AB)}, Tag (hex): ${bytesToHex(tag)}`);
 
-    // 4. Encrypt payload: XChaCha20-Poly1305; nonce=24B. Payload = two FIDs + optional note
-    // TODO: Implement with noble/ciphers
-    // const myFid = getMyFid(); // Need a way to get own FID (from FrameSDK context or user input)
-    // const targetFid = selectedTargetUser.fid;
-    // const note = ""; // Optional note
-    // const cipher = await encryptPayload(K_AB, myFid, targetFid, note);
-    // statusDiv.innerHTML = `<p>Processing... Payload encrypted.</p>`;
+        console.log("Step 4: Encrypting payload...");
+        const note = "";
+        const cipherForChain = await encryptPayload(K_AB, myFid, selectedTargetUser.fid, note);
+        statusDiv.innerHTML = `<p>Processing... Payload encrypted.</p>`;
+        console.log(`  Cipher for chain (hex, length ${cipherForChain.length}): ${bytesToHex(cipherForChain)}`);
 
-    // 5. Partial Tx build: Fee-payer blank; instruction = submit_crush(cipher)
-    // TODO: Implement Solana transaction building (manually or with a lightweight library)
-    // const transaction = await buildPartialTransaction(pkPrime, cipher); // pkPrime is the signer here
-    // statusDiv.innerHTML = `<p>Processing... Partial transaction built.</p>`;
+        console.log("Step 5: Building partial transaction (simulated)...");
+        statusDiv.innerHTML = `<p>Processing... Partial transaction prepared (simulated).</p>`;
+        console.log(`  Would build transaction with:`);
+        console.log(`    Instruction: submit_crush`);
+        console.log(`    Cipher data (hex): ${bytesToHex(cipherForChain)}`);
+        console.log(`    Signer (stealth public key, pkPrime): ${bs58.encode(pkPrime)}`);
 
-    // 6. POST /relay: {tx:base64}
-    // TODO: Implement API call to your /relay endpoint (not yet defined in api/src/index.js)
-    // const relayResponse = await postToRelay(transaction);
-    // statusDiv.innerHTML = `<p>Crush sent to relay! Signature: ${relayResponse.signature}</p>`;
-    
-    // For now, simulate completion
-    setTimeout(() => {
-         statusDiv.innerHTML = `<p>Simulated Crush Sent to ${selectedTargetUser.display_name}!</p><p>This is where actual crypto would happen.</p><p>Next: Implement actual crypto, tx building, and relay.</p>`;
-    }, 1000);
-    alert("Crush sequence initiated (currently simulated). Check console for details and TODOs.");
+        console.log("Step 6: Posting to relay (simulated)...");
+        statusDiv.innerHTML = `<p>Crush transaction ready for relay (simulated).</p>`;
+        console.log(`  Would POST to /relay with the serialized transaction.`);
+
+        setTimeout(() => {
+            statusDiv.innerHTML = `
+                <div style="padding: 15px;">
+                    <p style="color: green; font-weight: bold; font-size: 1.1em;">Simulated Crush Sent to ${selectedTargetUser.display_name}!</p>
+                    <p style="font-size: 0.9em; margin-top: 10px;">The cryptographic operations are complete. Check the debug console for detailed key information. The next steps involve building a real Solana transaction and sending it to the relay service.</p>
+                    <details style="margin-top: 15px; font-size: 0.8em; background: #f9f9f9; border: 1px solid #eee; padding: 8px; border-radius: 4px;">
+                        <summary>Debug: Derived Values (Click to expand)</summary>
+                        <ul style="list-style-type: disc; padding-left: 20px; word-break: break-all;">
+                            <li>Your FID: ${myFid}</li>
+                            <li>Target FID: ${selectedTargetUser.fid}</li>
+                            <li>Target Username: @${selectedTargetUser.username}</li>
+                            <li>kWallet (first 8B): ${bytesToHex(sessionKWallet.slice(0,8))}...</li>
+                            <li>edPubTarget (Solana Addr): ${edPubTarget}</li>
+                            <li>Stealth sk\' (private key, first 8B): ${bytesToHex(skPrime.slice(0,8))}...</li>
+                            <li>Stealth pk\' (public key, bs58): ${bs58.encode(pkPrime)}</li>
+                            <li>Shared Secret (first 8B): ${bytesToHex(sharedSecret.slice(0,8))}...</li>
+                            <li>Symmetric Key K_AB (first 8B): ${bytesToHex(K_AB.slice(0,8))}...</li>
+                            <li>Tag for Indexing (first 8B): ${bytesToHex(tag.slice(0,8))}...</li>
+                            <li>Cipher for Chain (112B, first 8B): ${bytesToHex(cipherForChain.slice(0,8))}...</li>
+                        </ul>
+                    </details>
+                    <button id="searchAgainAfterCrushBtn" style="margin-top: 15px;">Send Another Crush</button>
+                </div>
+            `;
+            document.getElementById('searchAgainAfterCrushBtn').addEventListener('click', () => {
+                document.getElementById('userSearchInput').value = '';
+                if(resultsDiv) {
+                    resultsDiv.innerHTML = ''; 
+                    resultsDiv.classList.remove('populated');
+                }
+                selectedTargetUser = null; 
+            });
+        }, 500);
+
+    } catch (cryptoError) {
+        console.error("Error during crush sequence cryptography:", cryptoError);
+        statusDiv.innerHTML = `<p style="color: red; padding: 15px;">Crypto Error: ${cryptoError.message}. Check console for details.</p>`;
+        statusDiv.classList.add('populated');
+    }
 }
