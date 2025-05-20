@@ -9,6 +9,7 @@
         "@noble/curves": "^1.9.1",
         "@noble/ed25519": "^2.2.3",
         "@noble/hashes": "^1.8.0",
+        "@solana/web3.js": "^1.98.2",
       },
       "devDependencies": {
         "vite": "^6.0.1",

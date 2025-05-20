@@ -8,8 +8,18 @@ import { concatBytes, randomBytes } from '@noble/hashes/utils'; // For randomByt
 import { xchacha20poly1305 } from '@noble/ciphers/chacha.js'; 
 import { bytesToHex } from '@noble/hashes/utils';
 import bs58 from 'bs58';
+import {
+    Connection,
+    PublicKey,
+    Transaction,
+    TransactionInstruction,
+    SystemProgram, // If needed for PDA creation or other system calls
+    // Message, // If constructing manually, less likely now
+} from '@solana/web3.js';
 
 const API_ROOT = 'https://mutual-match-api.kasra.codes';
+const SOLANA_RPC_URL = 'https://api.mainnet-beta.solana.com'; // Replace with your preferred RPC
+const CRUSH_PROGRAM_ID = new PublicKey('YOUR_CRUSH_PROGRAM_ID_HERE'); // Replace with your actual Program ID
 
 console.log("Encrypted Mutual Match App Initializing...");
 
@@ -608,6 +618,103 @@ async function encryptPayload(K_AB, myFid, targetFid, note = "") {
 
 // --- End Crypto Helper Functions ---
 
+// --- Solana Transaction Helper ---
+
+// PRD 4.2: Partial Tx build
+// Fee-payer blank; instruction = submit_crush(cipher)
+// Serialize + manual ed25519 sig with sk'
+async function buildPartialTransaction(skPrime, pkPrime, tag, cipherForChain) {
+    console.log("buildPartialTransaction: pkPrime (signer, bs58):", bs58.encode(pkPrime));
+    console.log("buildPartialTransaction: tag (for PDA, hex):", bytesToHex(tag));
+    console.log("buildPartialTransaction: cipherForChain (hex):", bytesToHex(cipherForChain.slice(0,16)) + "...");
+
+    const connection = new Connection(SOLANA_RPC_URL);
+
+    // 1. Derive the PDA for the crush account
+    // PRD: seeds = [b"crush", tag]
+    const pdaSeeds = [
+        Buffer.from("crush"), // b"crush"
+        tag                     // The 32-byte tag derived earlier
+    ];
+    const [crushPda, crushPdaBump] = await PublicKey.findProgramAddressSync(pdaSeeds, CRUSH_PROGRAM_ID);
+    console.log(`  Crush PDA: ${crushPda.toBase58()}, Bump: ${crushPdaBump}`);
+
+    // 2. Create the instruction
+    // We need to know the exact structure of `submit_crush`'s accounts.
+    // Assuming: 0: crush_pda (writable), 1: signer (pkPrime, signer)
+    //           (Possibly SystemProgram if PDA needs init, but PRD suggests program handles init based on `filled` state)
+    const keys = [
+        { pubkey: crushPda, isSigner: false, isWritable: true },
+        { pubkey: new PublicKey(pkPrime), isSigner: true, isWritable: false },
+        // { pubkey: SystemProgram.programId, isSigner: false, isWritable: false } // If needed
+    ];
+
+    // The `data` for the instruction is just the cipher (112 bytes).
+    // Anchor typically prepends an 8-byte discriminator for the instruction name.
+    // We need to know this discriminator for `submit_crush`.
+    // For now, assuming a utility on the backend or a known constant.
+    // Let's represent the data as just the cipher for now, and assume the discriminator handling is either 
+    // not needed for manual construction this way OR will be prefixed by a helper / known constant.
+    // If using Anchor client, it handles this. Manually, we need it.
+    // Placeholder: const SUBMIT_CRUSH_DISCRIMINATOR = Buffer.from([...]); 
+    // const instructionData = Buffer.concat([SUBMIT_CRUSH_DISCRIMINATOR, Buffer.from(cipherForChain)]);
+    // For now, directly passing cipher. This will likely FAIL without the discriminator if calling an Anchor program.
+    // This part *critically* depends on how you call your Solana program method without the Anchor client.
+    // Typically, you hash 'global:submit_crush' or 'instruction:submit_crush' to get the 8-byte discriminator.
+    // For example: sha256('global:submit_crush').slice(0, 8)
+    // Let's simulate getting this discriminator for now.
+    const instructionName = "submit_crush";
+    const sighash = sha256(`global:${instructionName}`).slice(0, 8); // Common Anchor sighash
+    const instructionData = Buffer.concat([Buffer.from(sighash), Buffer.from(cipherForChain)]);
+    console.log(`  Instruction data sighash (hex): ${bytesToHex(sighash)}`);
+
+
+    const instruction = new TransactionInstruction({
+        keys: keys,
+        programId: CRUSH_PROGRAM_ID,
+        data: Buffer.from(instructionData),
+    });
+
+    // 3. Create the transaction
+    const { blockhash } = await connection.getLatestBlockhash();
+    console.log(`  Recent blockhash: ${blockhash}`);
+
+    const transaction = new Transaction();
+    transaction.add(instruction);
+    transaction.recentBlockhash = blockhash;
+    transaction.feePayer = new PublicKey(pkPrime); // Stealth key is payer initially, relay will change
+
+    // 4. Sign with skPrime (MANUALLY using noble)
+    // We need to serialize the transaction message, sign its hash, then add the signature.
+    const messageToSign = transaction.compileMessage(); // Compiles the message to be signed
+    
+    // Noble ed25519.sign expects the hash of the message if it's too long, or the message itself.
+    // Solana transactions are typically signed over the sha256 hash of the message bytes.
+    // However, noble ed25519.sign can take the message directly.
+    // Let's confirm noble's behavior: it hashes the message if it's > 64 bytes.
+    // Transaction messages are usually larger, so it will hash internally.
+    const signature = ed25519.sign(messageToSign.serialize(), skPrime);
+    console.log(`  Signature with skPrime (hex, first 16B): ${bytesToHex(signature.slice(0,16))}...`);
+
+    // Add the signature to the transaction
+    // The addSignature method takes the public key and the signature
+    transaction.addSignature(new PublicKey(pkPrime), Buffer.from(signature));
+
+    // 5. Serialize the partially signed transaction (relay expects this)
+    // The transaction is now signed by pkPrime. The feePayer (also pkPrime for now) signature is present.
+    // The relay will add its own signature as the *actual* feePayer.
+    const serializedTransaction = transaction.serialize({
+        requireAllSignatures: false, // IMPORTANT: pkPrime is the only signer we add here
+        verifySignatures: false // We just signed it, verification can be done by relay/chain
+    });
+    const base64Transaction = Buffer.from(serializedTransaction).toString('base64');
+    console.log(`  Serialized Tx for relay (base64, first 32 chars): ${base64Transaction.substring(0,32)}...`);
+
+    return base64Transaction;
+}
+
+// --- End Solana Transaction Helper ---
+
 async function handleSendCrush() {
     if (!selectedTargetUser || !selectedTargetUser.primary_sol_address) {
         alert("No target user with a Solana address selected!");
@@ -682,12 +789,11 @@ async function handleSendCrush() {
         statusDiv.innerHTML = `<p>Processing... Payload encrypted.</p>`;
         console.log(`  Cipher for chain (hex, length ${cipherForChain.length}): ${bytesToHex(cipherForChain)}`);
 
-        console.log("Step 5: Building partial transaction (simulated)...");
-        statusDiv.innerHTML = `<p>Processing... Partial transaction prepared (simulated).</p>`;
-        console.log(`  Would build transaction with:`);
-        console.log(`    Instruction: submit_crush`);
-        console.log(`    Cipher data (hex): ${bytesToHex(cipherForChain)}`);
-        console.log(`    Signer (stealth public key, pkPrime): ${bs58.encode(pkPrime)}`);
+        // Step 5: Partial Tx build
+        console.log("Step 5: Building partial transaction...");
+        const base64Tx = await buildPartialTransaction(skPrime, pkPrime, tag, cipherForChain);
+        statusDiv.innerHTML = `<p>Processing... Partial transaction built.</p>`;
+        console.log(`  Base64 Encoded Tx for Relay: ${base64Tx.substring(0,64)}...`);
 
         console.log("Step 6: Posting to relay (simulated)...");
         statusDiv.innerHTML = `<p>Crush transaction ready for relay (simulated).</p>`;
