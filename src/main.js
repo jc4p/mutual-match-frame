@@ -2,8 +2,7 @@ import './style.css';
 import * as frame from '@farcaster/frame-sdk';
 import { sha256 } from '@noble/hashes/sha2';
 import { hmac } from '@noble/hashes/hmac';
-import { ed25519 } from '@noble/curves/ed25519';
-import { x25519 } from '@noble/curves/x25519';
+import { ed25519, x25519 } from '@noble/curves/ed25519';
 import { concatBytes, randomBytes } from '@noble/hashes/utils'; // For randomBytes (nonce) and concatBytes
 import { xchacha20poly1305 } from '@noble/ciphers/chacha.js'; 
 import { bytesToHex } from '@noble/hashes/utils';
@@ -19,7 +18,9 @@ import {
 
 const API_ROOT = 'https://mutual-match-api.kasra.codes';
 const SOLANA_RPC_URL = 'https://api.mainnet-beta.solana.com'; // Replace with your preferred RPC
-const CRUSH_PROGRAM_ID = new PublicKey('YOUR_CRUSH_PROGRAM_ID_HERE'); // Replace with your actual Program ID
+// Using SystemProgram.programId as a valid placeholder for CRUSH_PROGRAM_ID until actual is available
+const CRUSH_PROGRAM_ID = SystemProgram.programId; 
+// const CRUSH_PROGRAM_ID = new PublicKey('YOUR_CRUSH_PROGRAM_ID_HERE'); // Replace with your actual Program ID
 
 console.log("Encrypted Mutual Match App Initializing...");
 
@@ -473,11 +474,6 @@ document.addEventListener('DOMContentLoaded', async () => {
 // - POST /relay
 // - Update index
 
-// We will also need the @noble/* crypto libraries mentioned in PRD 4.1.
-// Please run:
-// npm install @noble/hashes @noble/ed25519 @noble/curves
-// You might need an additional library for XChaCha20-Poly1305.
-
 // --- Crypto Helper Functions ---
 
 // PRD 4.2: Stealth key derivation
@@ -770,7 +766,7 @@ async function handleSendCrush() {
     try {
         console.log("Step 1: Deriving stealth key...");
         const { skPrime, pkPrime } = await deriveStealthKey(sessionKWallet, edPubTargetBytes);
-        statusDiv.innerHTML = `<p>Processing... Stealth key derived.</p>`; // Simplified UI message
+        statusDiv.innerHTML = `<p>Processing... Stealth key derived.</p>`;
         console.log(`  skPrime (hex): ${bytesToHex(skPrime)}, pkPrime (hex): ${bytesToHex(pkPrime)}`);
 
         console.log("Step 2: Performing ECDH...");
