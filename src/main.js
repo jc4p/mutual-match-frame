@@ -2,7 +2,7 @@ import './style.css';
 import * as frame from '@farcaster/frame-sdk';
 import { sha256 } from '@noble/hashes/sha2';
 import { hmac } from '@noble/hashes/hmac';
-import { ed25519, x25519 } from '@noble/curves/ed25519';
+import { ed25519, x25519, edwardsToMontgomeryPub, edwardsToMontgomeryPriv } from '@noble/curves/ed25519';
 import { concatBytes, randomBytes } from '@noble/hashes/utils'; // For randomBytes (nonce) and concatBytes
 import { xchacha20poly1305 } from '@noble/ciphers/chacha.js'; 
 import { bytesToHex } from '@noble/hashes/utils';
@@ -503,23 +503,20 @@ async function deriveStealthKey(kWallet, edPubTargetBytes) {
   return { skPrime, pkPrime };
 }
 
-// TODO: PRD 4.2: ECDH
+// PRD 4.2: ECDH
 // convert edPubTarget -> xPubT, xPrivS = edToCurve(sk'), shared = scalarMult(xPrivS,xPubT)
 async function performECDH(skPrimeEd, edPubTargetBytes) {
   // Convert Ed25519 private key (skPrimeEd) to X25519 private key (scalar)
-  const xPrivS = x25519.edwardsToMontgomeryPriv(skPrimeEd);
+  const xPrivS = edwardsToMontgomeryPriv(skPrimeEd); // Using directly imported function
   
   // Convert Ed25519 public key (edPubTargetBytes) to X25519 public key
-  // Noble's x25519.edwardsToMontgomeryPub expects a point, but edPubTargetBytes is a compressed point (32 bytes)
-  // We first need to ensure edPubTargetBytes is a valid Ed25519 public key.
-  // Then, x25519.getSharedSecret expects the other party's X25519 *public* key.
-  // edwardsToMontgomeryPub will convert the Ed25519 public key to an X25519 public key.
-  const xPubT = x25519.edwardsToMontgomeryPub(edPubTargetBytes);
+  const xPubT = edwardsToMontgomeryPub(edPubTargetBytes); // Using directly imported function
 
   console.log("performECDH: xPrivS (scalar, hex, first 8B):", bytesToHex(xPrivS.slice(0,8)));
   console.log("performECDH: xPubT (X25519 pubkey, hex, first 8B):", bytesToHex(xPubT.slice(0,8)));
 
-  const sharedSecret = await x25519.getSharedSecret(xPrivS, xPubT);
+  // x25519.getSharedSecret is the correct function from the x25519 object obtained from import { ed25519, x25519 ... }
+  const sharedSecret = await x25519.getSharedSecret(xPrivS, xPubT); 
   
   console.log("performECDH: sharedSecret (hex, first 8B):", bytesToHex(sharedSecret.slice(0,8)));
   if (sharedSecret.length !== 32) {
