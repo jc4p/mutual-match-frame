@@ -80,3 +80,82 @@ button:focus,
 button:focus-visible {
   outline: 4px auto -webkit-focus-ring-color;
 }
+
+/* User Search Input Styles */
+.user-search-input {
+  width: 100%;
+  padding: 12px 15px;
+  margin: 15px 0;
+  font-size: 1em;
+  border: 1px solid #ccc;
+  border-radius: 8px;
+  box-sizing: border-box; /* So padding doesn't add to width */
+  transition: border-color 0.25s, box-shadow 0.25s;
+}
+
+.user-search-input:focus {
+  border-color: #646cff;
+  box-shadow: 0 0 0 2px rgba(100, 108, 255, 0.2);
+  outline: none;
+}
+
+/* Search Results Styling */
+.search-results-container {
+  margin-top: 10px;
+  border-radius: 8px;
+  max-height: 300px; /* Limit height and make scrollable if many results */
+  overflow-y: auto;
+  background-color: #fff; /* Ensure background for items */
+  border: 1px solid #ddd; /* Add a border to the container itself */
+  box-shadow: 0 2px 5px rgba(0,0,0,0.1); /* Add a subtle shadow */
+}
+
+.search-result-item {
+  display: flex;
+  align-items: center;
+  padding: 10px 15px;
+  border-bottom: 1px solid #eee;
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+
+.search-result-item:last-child {
+  border-bottom: none;
+}
+
+.search-result-item:hover {
+  background-color: #f0f2f5;
+}
+
+.search-result-item img {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  margin-right: 12px;
+  border: 1px solid #ddd; /* Subtle border for pfp */
+}
+
+.search-result-item div strong {
+  font-weight: 500;
+  color: #333;
+}
+
+.search-result-item div small {
+  color: #777;
+  font-size: 0.85em;
+}
+
+/* Styling for messages within searchResults div (e.g., "Searching...", "No users found") */
+.search-results-container p {
+  padding: 15px;
+  text-align: center;
+  color: #555;
+  font-style: italic;
+  margin: 0; /* Remove default margin for p inside container */
+}
+
+.search-results-container p small {
+  font-style: normal; /* Reset italic for nested small if any */
+  font-size: 0.9em;
+  color: #666;
+}

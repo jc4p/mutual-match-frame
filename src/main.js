@@ -277,7 +277,7 @@ async function connectAndSign() {
         
         statusMessageDiv.innerHTML = "<p>Solana Provider found! Connecting to wallet...</p>";
 
-        let publicKeyString; // Expecting a string directly based on logs
+        let publicKeyString; 
         try {
             console.log("Attempting solanaProvider connect...");
             statusMessageDiv.innerHTML = "<p>Awaiting wallet connection approval...</p>";
@@ -299,7 +299,6 @@ async function connectAndSign() {
             return null;
         }
         
-        // publicKeyString is already a base58 string, no need for .toBytes() or bs58.encode()
         console.log("Successfully obtained publicKey string:", publicKeyString);
         statusMessageDiv.innerHTML = `<p>Wallet connected: ${publicKeyString.slice(0,4)}...${publicKeyString.slice(-4)}. Signing message...</p>`;
 
@@ -314,7 +313,6 @@ async function connectAndSign() {
         if (signedMessageResult && typeof signatureString === 'string') {
             let decodedSuccessfully = false;
 
-            // Attempt 1: Decode as Base58
             try {
                 const decodedBs58 = bs58.decode(signatureString);
                 if (decodedBs58.length === 64) {
@@ -325,11 +323,9 @@ async function connectAndSign() {
                     console.warn(`Base58 decoded signature has length ${decodedBs58.length}, expected 64. Will try Base64.`);
                 }
             } catch (bs58Error) {
-                // Log lightly, as this might just be a Base64 string
                 console.log("Could not decode signature as Base58, trying Base64. (BS58 Error: ", bs58Error.message, ")");
             }
 
-            // Attempt 2: Decode as Base64 (if Base58 failed or was wrong length)
             if (!decodedSuccessfully) {
                 try {
                     const binaryString = atob(signatureString);
@@ -368,15 +364,10 @@ async function connectAndSign() {
              statusMessageDiv.innerHTML = '<p>Error: Signature processing failed.</p>';
              return null;
         }
-        // The PRD implies a 64-byte signature is standard for Ed25519.
-        // This check is now handled during the decoding attempts above.
-        // if (signature.length !== 64) {
-        //     console.warn(`Expected signature length 64 from signMessage, got ${signature.length}. This might affect kWallet derivation if HMAC expects a specific key length.`);
-        // }
 
         const kWallet = sha256(signature);
         sessionKWallet = kWallet;
-        sessionPublicKey = publicKeyString; // Store the string directly
+        sessionPublicKey = publicKeyString; 
 
         console.log('Raw signature (first 16 bytes hex):', bytesToHex(signature.slice(0,16)));
         console.log('kWallet (hex, first 8 bytes):', bytesToHex(kWallet.slice(0,8)));
@@ -384,11 +375,9 @@ async function connectAndSign() {
         statusMessageDiv.innerHTML = `<p>Successfully signed message and derived kWallet!</p>`;
         
         contentDiv.innerHTML = `
-            <p>kWallet derived. You can now search for a user to send a secret crush.</p>
-            <p><small>Raw Signature (first 16B hex): ${bytesToHex(signature.slice(0,16))}</small></p>
-            <p><small>kWallet (first 8B hex): ${bytesToHex(kWallet.slice(0,8))}</small></p>
-            <input type="text" id="userSearchInput" placeholder="Search Farcaster users...">
-            <div id="searchResults"></div>
+            <p>Welcome! Search for a user to send a secret crush.</p>
+            <input type="text" id="userSearchInput" class="user-search-input" placeholder="Search Farcaster users by name or FID...">
+            <div id="searchResults" class="search-results-container"></div>
         `;
         document.getElementById('userSearchInput').addEventListener('input', (e) => {
             debouncedSearchUsers(e.target.value);
