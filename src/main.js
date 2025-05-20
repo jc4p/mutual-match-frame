@@ -18,7 +18,7 @@ import {
 import { Buffer } from 'buffer'; // Import Buffer
 
 const API_ROOT = 'https://mutual-match-api.kasra.codes';
-const SOLANA_RPC_URL = 'https://api.mainnet-beta.solana.com'; // Replace with your preferred RPC
+const SOLANA_RPC_URL = `${API_ROOT}/api/solana-rpc`; 
 // Using SystemProgram.programId as a valid placeholder for CRUSH_PROGRAM_ID until actual is available
 const CRUSH_PROGRAM_ID = SystemProgram.programId; 
 // const CRUSH_PROGRAM_ID = new PublicKey('YOUR_CRUSH_PROGRAM_ID_HERE'); // Replace with your actual Program ID

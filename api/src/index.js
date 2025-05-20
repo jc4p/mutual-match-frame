@@ -79,4 +79,59 @@ app.get('/api/search-users', async (c) => {
 	}
 });
 
+// New route for Solana RPC Proxy
+app.post('/api/solana-rpc', async (c) => {
+	const { ALCHEMY_SOLANA_RPC_URL } = c.env;
+	if (!ALCHEMY_SOLANA_RPC_URL) {
+		console.error('ALCHEMY_SOLANA_RPC_URL not configured in worker environment');
+		return c.json({ error: 'RPC proxy not configured' }, 500);
+	}
+
+	let requestBody;
+	try {
+		requestBody = await c.req.json();
+	} catch (e) {
+		console.error('Failed to parse request body for RPC proxy:', e);
+		return c.json({ error: 'Invalid request body' }, 400);
+	}
+
+	try {
+		console.log(`Proxying RPC request to: ${ALCHEMY_SOLANA_RPC_URL}`/*, JSON.stringify(requestBody)*/); // Avoid logging potentially large bodies unless debugging
+
+		const alchemyResponse = await fetch(ALCHEMY_SOLANA_RPC_URL, {
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/json',
+				// Add any other headers Alchemy might require, if any (usually just Content-Type)
+			},
+			body: JSON.stringify(requestBody),
+		});
+
+		// Forward the response from Alchemy back to the client
+		// We need to be careful about headers, especially for CORS if the client makes direct OPTIONS preflights
+		// but since this is a proxy, we mainly care about the content type and the body.
+		
+		// Create a new response with the body and status from Alchemy
+		// Clone the response to be able to access its properties and return its body
+		const alchemyResponseBody = await alchemyResponse.clone().arrayBuffer();
+		
+		// Set headers from Alchemy response. Filter or be selective if needed.
+		const responseHeaders = new Headers();
+		responseHeaders.set('Content-Type', alchemyResponse.headers.get('Content-Type') || 'application/json');
+		// Add other important headers from alchemyResponse if necessary, e.g., cache-control, etc.
+
+		// Log status for debugging
+		console.log(`Alchemy response status: ${alchemyResponse.status}`);
+
+		return new Response(alchemyResponseBody, {
+			status: alchemyResponse.status,
+			headers: responseHeaders
+		});
+
+	} catch (error) {
+		console.error('Error proxying Solana RPC request:', error);
+		return c.json({ error: 'Failed to proxy RPC request', details: error.message }, 500);
+	}
+});
+
 export default app;
