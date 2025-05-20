@@ -724,7 +724,7 @@ async function handleSendCrush() {
 
     let myFid;
     try {
-        const frameContext = await frame.sdk.context();
+        const frameContext = await frame.sdk.context;
         if (!frameContext || typeof frameContext.fid !== 'number') {
             console.error("Could not get user FID from frame context:", frameContext);
             alert("Could not determine your Farcaster FID. Unable to send crush.");
