@@ -549,63 +549,48 @@ async function deriveSymmetricKeyAndTag(sharedSecret) {
 // TODO: PRD 4.2: Encrypt payload
 // XChaCha20-Poly1305; nonce=24 B. Payload = two FIDs + optional note
 async function encryptPayload(K_AB, myFid, targetFid, note = "") {
-  // Payload: two FIDs (assuming they are numbers, convert to a fixed-size byte representation, e.g., 8 bytes each for u64)
-  // For simplicity, let's assume FIDs fit in 4 bytes (Uint32) for now.
-  // PRD doesn't specify FID byte representation, adjust if needed.
-  const myFidBytes = new Uint8Array(new Uint32Array([myFid]).buffer); // 4 bytes
-  const targetFidBytes = new Uint8Array(new Uint32Array([targetFid]).buffer); // 4 bytes
-  const noteBytes = new TextEncoder().encode(note); // Variable length
+  const myFidBytes = new Uint8Array(new Uint32Array([myFid]).buffer); 
+  const targetFidBytes = new Uint8Array(new Uint32Array([targetFid]).buffer); 
+  const noteBytes = new TextEncoder().encode(note);
 
-  const payload = concatBytes(myFidBytes, targetFidBytes, noteBytes);
-  const nonce = randomBytes(24); // XChaCha20-Poly1305 uses a 24-byte nonce
+  if (noteBytes.length > 0) {
+    // With a 48-byte total target, and 24B nonce + 16B auth tag + 8B FIDs = 48B,
+    // there is no space for a note.
+    console.error("encryptPayload: Note is not supported if cipher size is fixed to 48 bytes.");
+    throw new Error("Note is not supported with the current 48-byte cipher configuration.");
+  }
 
-  const cipher = xchacha20poly1305(K_AB, nonce); // Initialize cipher with key and nonce
-  const encryptedPayload = cipher.encrypt(payload); // Encrypt the data
-
-  // The result includes the ciphertext and the Poly1305 tag.
-  // For transmission, we need to send nonce + encryptedPayload (which includes the tag)
-  // The PRD cipher field is 112 bytes: 24 (nonce) + payload (e.g. 4+4+X for FIDs+note) + 16 (Poly1305 tag).
-  // If payload is myFid(4) + targetFid(4) = 8 bytes. Then 24 + 8 + 16 = 48 bytes.
-  // This implies the "note" might be larger or there's padding, or the 112B is an upper limit.
-  // Let's assume the 112B is the expected size of `cipher` to be stored on-chain.
-  // This means `nonce + encryptedPayload` must be exactly 112 bytes.
-
+  const payload = concatBytes(myFidBytes, targetFidBytes, noteBytes); // noteBytes will be empty
+  const nonce = randomBytes(24);
+  const cipher = xchacha20poly1305(K_AB, nonce);
+  const encryptedPayload = cipher.encrypt(payload);
   const combinedCiphertext = concatBytes(nonce, encryptedPayload);
 
   console.log("encryptPayload: myFidBytes (hex):", bytesToHex(myFidBytes));
   console.log("encryptPayload: targetFidBytes (hex):", bytesToHex(targetFidBytes));
-  console.log("encryptPayload: noteBytes (hex):", bytesToHex(noteBytes));
-  console.log("encryptPayload: payload (hex, first 16B):", bytesToHex(payload.slice(0,16)));
+  // console.log("encryptPayload: noteBytes (hex):", bytesToHex(noteBytes)); // Note is empty
+  console.log("encryptPayload: payload (FIDs only, hex):", bytesToHex(payload));
   console.log("encryptPayload: K_AB (hex, first 8B):", bytesToHex(K_AB.slice(0,8)));
   console.log("encryptPayload: nonce (hex):", bytesToHex(nonce));
-  console.log("encryptPayload: encryptedPayload (incl. Poly1305 tag, hex, first 16B):", bytesToHex(encryptedPayload.slice(0,16)));
-  console.log("encryptPayload: combinedCiphertext (nonce + encrypted, hex, first 16B):", bytesToHex(combinedCiphertext.slice(0,16)));
+  console.log("encryptPayload: encryptedPayload (incl. Poly1305 tag, hex):", bytesToHex(encryptedPayload));
+  console.log("encryptPayload: combinedCiphertext (nonce + encrypted, hex):", bytesToHex(combinedCiphertext));
   console.log("encryptPayload: combinedCiphertext length:", combinedCiphertext.length);
   
-  // PRD states cipher1/cipher2 on chain is [u8;112]
-  if (combinedCiphertext.length > 112) {
-    // This would happen if myFid(4) + targetFid(4) + noteBytes + Poly1305 tag (16) > (112 - 24 (nonce)) = 88 bytes.
-    // So, myFid(4) + targetFid(4) + noteBytes must be <= 72 bytes.
-    // If note is too long, we might need to truncate it or throw an error.
-    console.error(`Encrypted payload (combinedCiphertext) is ${combinedCiphertext.length} bytes, exceeds 112 bytes limit. Note might be too long.`);
-    throw new Error("Encrypted payload exceeds 112 byte limit. Try a shorter note.");
+  const TARGET_CIPHER_LENGTH = 48;
+
+  if (combinedCiphertext.length > TARGET_CIPHER_LENGTH) {
+    console.error(`Encrypted payload is ${combinedCiphertext.length} bytes, exceeds ${TARGET_CIPHER_LENGTH} bytes limit.`);
+    throw new Error(`Encrypted payload exceeds ${TARGET_CIPHER_LENGTH} byte limit.`);
   }
   
-  // If it's less than 112, we might need to pad it. The PRD implies a fixed size.
-  // For now, let's return it and handle potential padding/truncation before on-chain submission.
-  // Or, more robustly, ensure the note is constrained such that the total is exactly 112, or error if too large.
-  // Let's assume for now, the note will be short enough. If not, we need a strategy.
-  // If the combinedCiphertext is SHORTER than 112, we'll pad it.
   let finalCipherForChain = combinedCiphertext;
-  if (combinedCiphertext.length < 112) {
-    console.warn(`Combined ciphertext is ${combinedCiphertext.length} bytes, padding to 112 bytes for on-chain storage.`);
-    finalCipherForChain = new Uint8Array(112);
-    finalCipherForChain.set(combinedCiphertext); // Copies combinedCiphertext to the beginning of the 112-byte array
-  } else if (combinedCiphertext.length > 112) {
-     // This case should be caught by the check above, but as a safeguard:
-    throw new Error("Encrypted payload exceeds 112 byte limit after padding considerations.");
-  }
-
+  if (combinedCiphertext.length < TARGET_CIPHER_LENGTH) {
+    // This should not happen if note is empty and FIDs are 4+4 bytes, as 24(nonce) + (8(FIDs)+16(tag)) = 48.
+    console.warn(`Combined ciphertext is ${combinedCiphertext.length} bytes, padding to ${TARGET_CIPHER_LENGTH} bytes.`);
+    finalCipherForChain = new Uint8Array(TARGET_CIPHER_LENGTH);
+    finalCipherForChain.set(combinedCiphertext); 
+  } 
+  // No explicit else if (combinedCiphertext.length === TARGET_CIPHER_LENGTH) needed, it just passes through.
 
   return finalCipherForChain; 
 }
