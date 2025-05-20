@@ -15,6 +15,7 @@ import {
     SystemProgram, // If needed for PDA creation or other system calls
     // Message, // If constructing manually, less likely now
 } from '@solana/web3.js';
+import { Buffer } from 'buffer'; // Import Buffer
 
 const API_ROOT = 'https://mutual-match-api.kasra.codes';
 const SOLANA_RPC_URL = 'https://api.mainnet-beta.solana.com'; // Replace with your preferred RPC
