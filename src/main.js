@@ -486,17 +486,31 @@ async function performSignatureAndSetup(provider, publicKeyStrToSignWith) {
         sessionAppPublicKeyHex = bytesToHex(appSpecificPublicKeyBytes);
         console.log('App-specific Public Key (hex):', sessionAppPublicKeyHex);
 
+        // Store session data in localStorage
+        try {
+            localStorage.setItem('sessionKWalletHex', bytesToHex(sessionKWallet));
+            localStorage.setItem('sessionPublicKeyString', sessionPublicKey);
+            console.log("Session keys stored in localStorage.");
+        } catch (e) {
+            console.error("Error saving session keys to localStorage:", e);
+            // Proceed without localStorage if it fails, but log the error
+        }
+
         console.log('Raw signature (first 16 bytes hex): ', bytesToHex(signature.slice(0,16)));
         console.log('kWallet (hex, first 8 bytes):', bytesToHex(sessionKWallet.slice(0,8)));
         console.log('kIndex (hex, first 8 bytes):', bytesToHex(sessionKIndex.slice(0,8)));
         
         updateStatusMessage(`Signed in! Wallet: ${sessionPublicKey.slice(0,4)}...${sessionPublicKey.slice(-4)}`);
         
+        // Initial layout: Mutual Matches at top, then Submit, then Other Crushes
         if(contentDiv) contentDiv.innerHTML = `
+            <div id="mutualMatchesContainerPlaceholder"></div> 
+            <hr style="margin: 20px 0; border-color: #eee;">
             <p>Submit New Crush:</p>
             <input type="text" id="userSearchInput" class="user-search-input" placeholder="Search by username...">
             <div id="searchResults" class="search-results-container"></div>
-            <div id="userIndexContainerPlaceholder"></div>
+            <hr style="margin: 20px 0; border-color: #eee;">
+            <div id="userIndexContainerPlaceholder"></div> 
         `;
         document.getElementById('userSearchInput').addEventListener('input', (e) => {
             debouncedSearchUsers(e.target.value);
@@ -531,7 +545,7 @@ async function performSignatureAndSetup(provider, publicKeyStrToSignWith) {
         
         const newGetStartedButton = document.getElementById('getStartedBtn');
         if (newGetStartedButton) { // If button was re-added to contentDiv
-            newGetStartedButton.textContent = 'Connect Wallet & Sign In';
+            newGetStartedButton.textContent = 'Authenticate';
             newGetStartedButton.disabled = false;
             newGetStartedButton.addEventListener('click', handleGetStartedClick); // Re-attach main handler
         } else if (getStartedButton) { // If original button is still there (e.g. contentDiv not replaced)
@@ -568,7 +582,7 @@ function initializeApp() {
             <div id="content">
                 <h3>Private, secret, fully encrypted onchain crushes.</h3>
                 <p>Tell the Solana chain (securely!) who you like. If they like you back (and have also used this app once), you'll both be notified!</p>
-                <p><strong>To get started:</strong> Connect your wallet and sign a message. This generates your unique keys for this app. <br/>For a match to work, the person you're interested in must also have signed into this app at least once.</p>
+                <p>For a match to work, the person you're interested in must also have signed into this app at least once.</p>
                 <button id="getStartedBtn" disabled>Loading SDK...</button>
             </div>
         `;
@@ -620,7 +634,6 @@ function populateHowItWorksModal() {
             <li>Strong, symmetric encryption protects your choices if there's a match.</li>
             <li>Anonymous onchain interactions for crush submissions.</li>
         </ul>
-        <p><small>Note: If you previously used an older version of Mutual Match, crushes sent with that version may not be compatible with this new mutual matching system.</small></p>
         `;
         
         // Clear existing content except h2 and close button
@@ -703,7 +716,7 @@ async function handleGetStartedClick() {
         updateStatusMessage(`Error connecting wallet: ${connectError.message}. Please try again.`, true);
         if(getStartedButton) {
             getStartedButton.disabled = false;
-            getStartedButton.textContent = 'Connect Wallet & Sign In';
+            getStartedButton.textContent = 'Authenticate';
         }
         userPublicKeyString = null; // Clear on error
         const contentDiv = document.getElementById('content');
@@ -715,6 +728,27 @@ async function handleGetStartedClick() {
             }
         }
     }
+}
+
+function handleSignOut() {
+    console.log("Signing out and clearing session data from localStorage...");
+    try {
+        localStorage.removeItem('sessionKWalletHex');
+        localStorage.removeItem('sessionPublicKeyString');
+        // Optionally, clear other session-related variables if they are not reset by page load
+        sessionKWallet = null;
+        sessionPublicKey = null;
+        sessionKIndex = null;
+        sessionAppPublicKeyHex = null;
+        userPublicKeyString = null;
+        selectedTargetUser = null;
+        // No need to clear solanaProviderInstance if it's managed by the SDK and might be reused.
+    } catch (e) {
+        console.error("Error clearing localStorage during sign out:", e);
+    }
+    updateStatusMessage("Signed out successfully.");
+    // Reload the page to reset the UI and state to initial
+    window.location.reload();
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
@@ -731,11 +765,69 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         solanaProviderInstance = await frame.sdk.experimental.getSolanaProvider();
 
-        if (solanaProviderInstance) {
-            if (statusMessageDiv) statusMessageDiv.innerHTML = "<p>Solana Provider available. Click 'Connect Wallet & Sign In'.</p>";
+        // Check for stored session data BEFORE enabling the Authenticate button
+        const storedKWalletHex = localStorage.getItem('sessionKWalletHex');
+        const storedPublicKeyString = localStorage.getItem('sessionPublicKeyString');
+
+        if (storedKWalletHex && storedPublicKeyString && solanaProviderInstance) {
+            console.log("Found stored session data. Attempting to restore session...");
+            updateStatusMessage("Restoring previous session...");
+            try {
+                sessionKWallet = hexToBytes(storedKWalletHex);
+                sessionPublicKey = storedPublicKeyString;
+                userPublicKeyString = storedPublicKeyString; // Also set this for consistency if provider uses it
+
+                const hotPrefix = utf8ToBytes("HOT");
+                sessionKIndex = sha256(concatBytes(hotPrefix, sessionKWallet));
+                const appSpecificPublicKeyBytes = ed25519.getPublicKey(sessionKWallet);
+                sessionAppPublicKeyHex = bytesToHex(appSpecificPublicKeyBytes);
+
+                console.log('Restored kWallet (hex, first 8 bytes):', bytesToHex(sessionKWallet.slice(0,8)));
+                console.log('Restored sessionPublicKey:', sessionPublicKey);
+                console.log('Restored App-specific Public Key (hex):', sessionAppPublicKeyHex);
+                updateStatusMessage(`Session restored for ${sessionPublicKey.slice(0,4)}...${sessionPublicKey.slice(-4)}`);
+                
+                // UI updates similar to successful performSignatureAndSetup
+                if(contentDiv) contentDiv.innerHTML = `
+                    <div id="mutualMatchesContainerPlaceholder"></div> 
+                    <hr style="margin: 20px 0; border-color: #eee;">
+                    <p>Submit New Crush:</p>
+                    <input type="text" id="userSearchInput" class="user-search-input" placeholder="Search by username...">
+                    <div id="searchResults" class="search-results-container"></div>
+                    <hr style="margin: 20px 0; border-color: #eee;">
+                    <div id="userIndexContainerPlaceholder"></div> 
+                    <button id="signOutBtn" style="margin-top: 20px; background-color: #f44336; color: white; border: none; padding: 8px 15px; border-radius: 4px; cursor: pointer;">Sign Out</button>
+                `;
+                document.getElementById('userSearchInput').addEventListener('input', (e) => {
+                    debouncedSearchUsers(e.target.value);
+                });
+                const signOutButton = document.getElementById('signOutBtn');
+                if (signOutButton) {
+                    signOutButton.addEventListener('click', handleSignOut);
+                }
+        
+                if(getStartedButton) getStartedButton.style.display = 'none';
+
+                await loadAndDisplayUserIndex();
+                await fetchRelayerPublicKey();
+                // No need to call updateUserIndexAndAppKeyOnApi here unless we confirm it's necessary for re-sync
+
+            } catch (restoreError) {
+                console.error("Error restoring session from localStorage:", restoreError);
+                localStorage.removeItem('sessionKWalletHex'); // Clear corrupted/invalid data
+                localStorage.removeItem('sessionPublicKeyString');
+                updateStatusMessage("Error restoring session. Please authenticate.", true);
+                // Fall through to enable Authenticate button
+                 if (getStartedButton) {
+                    getStartedButton.disabled = false;
+                    getStartedButton.textContent = 'Authenticate';
+                }
+            }
+        } else if (solanaProviderInstance) {
+            if (statusMessageDiv) statusMessageDiv.innerHTML = "<p>Solana Provider available. Click 'Authenticate'.</p>";
             if (getStartedButton) {
                 getStartedButton.disabled = false;
-                getStartedButton.textContent = 'Connect Wallet & Sign In';
+                getStartedButton.textContent = 'Authenticate';
             }
         } else {
             console.error("Failed to get Solana Provider from Farcaster SDK.");
@@ -1318,59 +1410,163 @@ async function loadAndDisplayUserIndex(displayStaleOnError = false) {
 }
 
 function displayUserIndex(indexArray) {
-    const placeholder = document.getElementById('userIndexContainerPlaceholder');
-    let indexContainer = document.getElementById('userIndexContainer');
-
-    if (!indexContainer && placeholder) {
-        indexContainer = document.createElement('div');
-        indexContainer.id = 'userIndexContainer';
-        indexContainer.style.marginTop = '20px';
-        placeholder.replaceWith(indexContainer); 
-    }
+    const mutualMatchesPlaceholder = document.getElementById('mutualMatchesContainerPlaceholder');
+    let mutualMatchesContainer = document.getElementById('mutualMatchesContainer');
     
-    if(indexContainer) {
-        indexContainer.innerHTML = '<h3>Your Secret Crushes:</h3>'; 
+    const otherCrushesPlaceholder = document.getElementById('userIndexContainerPlaceholder');
+    let otherCrushesContainer = document.getElementById('userIndexContainer'); // Re-using ID for consistency, represents non-mutuals now
 
-        const list = document.createElement('ul');
-        list.style.listStyleType = "none";
-        list.style.paddingLeft = "0";
+    // Separate entries
+    const mutualEntries = [];
+    const otherEntries = [];
+    if (indexArray && indexArray.length > 0) {
+        indexArray.forEach(entry => {
+            if (entry.status === "mutual") {
+                mutualEntries.push(entry);
+            } else {
+                otherEntries.push(entry);
+            }
+        });
+    }
 
-        if (!indexArray || indexArray.length === 0) {
-            list.innerHTML = '<li><p>No crushes sent yet. Find someone!</p></li>';
+    // --- Render Mutual Matches --- 
+    if (!mutualMatchesContainer) {
+        mutualMatchesContainer = document.createElement('div');
+        mutualMatchesContainer.id = 'mutualMatchesContainer';
+        mutualMatchesContainer.style.marginBottom = '20px';
+        if (mutualMatchesPlaceholder) {
+            mutualMatchesPlaceholder.replaceWith(mutualMatchesContainer);
         } else {
-            // Sort the array: mutual first, then by timestamp descending
-            const sortedArray = [...indexArray].sort((a, b) => {
-                if (a.status === 'mutual' && b.status !== 'mutual') return -1;
-                if (a.status !== 'mutual' && b.status === 'mutual') return 1;
-                return (b.ts || 0) - (a.ts || 0); // Sort by timestamp descending
-            });
-
-            sortedArray.forEach(entry => {
-                const item = document.createElement('li');
-                item.setAttribute('data-tag', entry.symmetricTag || entry.tag);  // Prefer symmetricTag, fallback to old tag
-                item.style.border = "1px solid #eee";
-                item.style.padding = "10px";
-                item.style.marginBottom = "8px";
-                item.style.borderRadius = "5px";
-                if (entry.status === "mutual") {
-                    item.style.backgroundColor = '#e6ffe6'; 
-                }
-                
-                const tagHexSnippet = entry.symmetricTag ? entry.symmetricTag.substring(0,16) : (entry.tag ? entry.tag.substring(0,16) : 'N/A');
-                item.innerHTML = `
-                    <strong>Target FID:</strong> ${entry.targetFid || 'N/A'} <br>
-                    <strong>Target Username:</strong> @${entry.targetUsername || 'N/A'} <br>
-                    <strong>Status:</strong> ${entry.status || 'N/A'} ${entry.status === "mutual" ? `&#10024; <span class="mutual-info">${entry.revealedInfo || 'It\'s a Match!'}</span>` : ""} <br>
-                    <strong>Timestamp:</strong> ${entry.ts ? new Date(entry.ts).toLocaleString() : 'N/A'} <br>
-                    <small>Tag: ${tagHexSnippet}...</small><br>
-                    ${entry.txSignature ? `<small>Tx: <a href="https://solscan.io/tx/${entry.txSignature}?cluster=mainnet" target="_blank" rel="noopener noreferrer">${entry.txSignature.substring(0,10)}...</a></small><br>` : '' }
-                `;
-                list.appendChild(item);
-            });
+            // Fallback if placeholder is missing (e.g. dynamic content changes)
+            const contentArea = document.getElementById('content');
+            if (contentArea) contentArea.prepend(mutualMatchesContainer); 
+            else document.body.prepend(mutualMatchesContainer); 
         }
-        indexContainer.appendChild(list);
+    }
+    mutualMatchesContainer.innerHTML = '<h3>Mutual Matches! 🎉</h3>';
+    if (mutualEntries.length === 0) {
+        mutualMatchesContainer.innerHTML += '<p><small>No mutual matches found yet. Keep trying!</small></p>';
     } else {
-        console.error("Could not find or create userIndexContainer.");
+        const mutualList = document.createElement('ul');
+        mutualList.style.listStyleType = "none";
+        mutualList.style.paddingLeft = "0";
+        mutualEntries.sort((a, b) => (b.ts || 0) - (a.ts || 0)); // Sort by timestamp desc
+
+        mutualEntries.forEach(entry => {
+            const item = document.createElement('li');
+            item.setAttribute('data-tag', entry.symmetricTag || entry.tag);
+            item.style.border = "1px solid #5cb85c"; // Green border
+            item.style.backgroundColor = '#e6ffe6'; // Light green background
+            item.style.padding = "10px";
+            item.style.marginBottom = "8px";
+            item.style.borderRadius = "5px";
+
+            let mutualCtaHtml = '';
+            if (entry.targetFid) { // FID should exist for a mutual match entry
+                mutualCtaHtml = `<button class="view-profile-btn" data-fid="${entry.targetFid}">View Profile</button><br/>`; // Changed button text
+            }
+            
+            // Updated display for mutual matches
+            let mutualStatusDisplay;
+            if (entry.targetUsername) {
+                mutualStatusDisplay = `✨ Mutual with @${entry.targetUsername}`;
+            } else if (entry.targetFid) {
+                mutualStatusDisplay = `✨ Mutual with User FID: ${entry.targetFid}`;
+            } else {
+                mutualStatusDisplay = `✨ It's a Match!`; // Fallback
+            }
+
+            let pfpHtml = '';
+            if (entry.targetPfpUrl) {
+                pfpHtml = `<img src="${entry.targetPfpUrl}" alt="@${entry.targetUsername || 'User'}" style="width: 30px; height: 30px; border-radius: 50%; margin-right: 8px; vertical-align: middle;">`;
+            }
+
+            item.innerHTML = `
+                <div style="display: flex; align-items: center; margin-bottom: 5px;">
+                    ${pfpHtml}
+                    <span class="mutual-info" style="font-weight: bold; flex-grow: 1;">${mutualStatusDisplay}</span>
+                </div>
+                ${mutualCtaHtml}
+                ${entry.txSignature ? `<small>Tx: <a href="https://solscan.io/tx/${entry.txSignature}?cluster=mainnet" target="_blank" rel="noopener noreferrer">${entry.txSignature.substring(0,10)}...</a></small><br>` : '' }
+            `;
+            mutualList.appendChild(item);
+        });
+        mutualMatchesContainer.appendChild(mutualList);
+    }
+
+    // Add event listener for view profile buttons AFTER mutualMatchesContainer is populated
+    if (mutualMatchesContainer && mutualEntries.length > 0) {
+        mutualMatchesContainer.addEventListener('click', async (event) => {
+            if (event.target.classList.contains('view-profile-btn')) {
+                const fidString = event.target.dataset.fid;
+                if (fidString) {
+                    try {
+                        const fid = parseInt(fidString, 10);
+                        if (isNaN(fid)) {
+                            console.error("Invalid FID for view profile button:", fidString);
+                            return;
+                        }
+                        console.log(`Calling viewProfile for FID: ${fid}`);
+                        await frame.sdk.actions.viewProfile({ fid });
+                    } catch (e) {
+                        console.error("Error parsing FID or calling viewProfile:", e);
+                    }
+                }
+            }
+        });
+    }
+
+    // --- Render Other Crushes (Pending, Failed, etc.) --- 
+    if (!otherCrushesContainer) {
+        otherCrushesContainer = document.createElement('div');
+        otherCrushesContainer.id = 'userIndexContainer'; // Keep ID for potential CSS or other references
+        otherCrushesContainer.style.marginTop = '20px';
+        if (otherCrushesPlaceholder) {
+            otherCrushesPlaceholder.replaceWith(otherCrushesContainer);
+        } else {
+            const contentArea = document.getElementById('content');
+            if (contentArea) contentArea.appendChild(otherCrushesContainer); // Append if no placeholder
+            else document.body.appendChild(otherCrushesContainer);
+        }
+    }
+    otherCrushesContainer.innerHTML = '<h3>Your Other Crushes:</h3>';
+    if (otherEntries.length === 0) {
+        otherCrushesContainer.innerHTML += '<p><small>No other pending or past crushes to show.</small></p>';
+    } else {
+        const otherList = document.createElement('ul');
+        otherList.style.listStyleType = "none";
+        otherList.style.paddingLeft = "0";
+        // Sort non-mutual by timestamp descending
+        otherEntries.sort((a, b) => (b.ts || 0) - (a.ts || 0)); 
+
+        otherEntries.forEach(entry => {
+            const item = document.createElement('li');
+            item.setAttribute('data-tag', entry.symmetricTag || entry.tag);
+            item.style.border = "1px solid #eee";
+            item.style.padding = "10px";
+            item.style.marginBottom = "8px";
+            item.style.borderRadius = "5px";
+            // Optional: Style differently based on status (e.g. pending, failed)
+            if (entry.status && entry.status.includes('fail')) {
+                item.style.backgroundColor = '#fdd'; // Light red for failed
+                item.style.borderColor = '#d9534f';
+            } else if (entry.status === 'pending') {
+                 item.style.backgroundColor = '#fffde7'; // Light yellow for pending
+            }
+
+            const tagHexSnippet = entry.symmetricTag ? entry.symmetricTag.substring(0,16) : (entry.tag ? entry.tag.substring(0,16) : 'N/A');
+            item.innerHTML = `
+                <strong>Target FID:</strong> ${entry.targetFid || 'N/A'} <br>
+                <strong>Target Username:</strong> @${entry.targetUsername || 'N/A'} <br>
+                <strong>Status:</strong> ${entry.status || 'N/A'} <br>
+                <strong>Timestamp:</strong> ${entry.ts ? new Date(entry.ts).toLocaleString() : 'N/A'} <br>
+                <small>Tag: ${tagHexSnippet}...</small><br>
+                ${entry.txSignature ? `<small>Tx: <a href="https://solscan.io/tx/${entry.txSignature}?cluster=mainnet" target="_blank" rel="noopener noreferrer">${entry.txSignature.substring(0,10)}...</a></small><br>` : '' }
+                ${entry.confirmationError ? `<small style="color:red;">Error: ${entry.confirmationError}</small><br>` : ''}
+            `;
+            otherList.appendChild(item);
+        });
+        otherCrushesContainer.appendChild(otherList);
     }
 }
 
@@ -1578,6 +1774,7 @@ async function handleSendCrush() {
                 ts: Date.now(),
                 targetFid: selectedTargetUser.fid,
                 targetUsername: selectedTargetUser.username,
+                targetPfpUrl: selectedTargetUser.pfp_url, // Store PFP URL
                 symmetricKeyHex: bytesToHex(symmetricEncryptionKey), // Changed from K_AB_hex and stores K_common
                 txSignature: finalTxSignature, 
                 confirmationError: confirmationErrorDetail,
