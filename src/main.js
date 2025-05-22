@@ -20,7 +20,7 @@ import { Buffer } from 'buffer'; // Import Buffer
 
 const API_ROOT = 'https://mutual-match-api.kasra.codes';
 const SOLANA_RPC_URL = `${API_ROOT}/api/solana-rpc`; 
-const CRUSH_PROGRAM_ID = new PublicKey('6etp2LgigJcYA9GqHecM7BtD1WJDzcdptQfi3tEntHrh'); // Updated Program ID
+const CRUSH_PROGRAM_ID = new PublicKey('EGYUNdDL63nN7NTZbE6P7qZdbaxSyvuXyyU4iVba5jDT'); // Updated Program ID
 
 const IS_PRODUCTION = true;
 
