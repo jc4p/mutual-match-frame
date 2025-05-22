@@ -211,8 +211,8 @@ function debounce(func, delay) {
 
 async function searchUsers(query) {
     const resultsDiv = document.getElementById('searchResults');
-    if (!query || query.length < 2) {
-        resultsDiv.innerHTML = '<p><small>Enter at least 2 characters to search.</small></p>';
+    if (!query || query.length < 1) { // MODIFIED: Changed from 2 to 1
+        resultsDiv.innerHTML = '<p><small>Enter at least 1 character to search.</small></p>'; // MODIFIED: Updated message
         resultsDiv.classList.remove('populated'); // Remove when prompt is shown
         return;
     }
