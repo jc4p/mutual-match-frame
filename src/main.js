@@ -18,8 +18,7 @@ import {
 } from '@solana/web3.js';
 import { Buffer } from 'buffer'; // Import Buffer
 
-// const API_ROOT = 'https://mutual-match-api.kasra.codes';
-const API_ROOT ='https://11b61a2abc20.ngrok.app';
+const API_ROOT = 'https://mutual-match-api.kasra.codes';
 const SOLANA_RPC_URL = `${API_ROOT}/api/solana-rpc`; 
 const CRUSH_PROGRAM_ID = new PublicKey('GSAh2GuhF6niNFhwV4Yd2Kbd18m3N7a6ysaseCrQiKy7'); // Updated Program ID
 
@@ -682,7 +681,7 @@ async function buildPartialTransaction(skPrime, pkPrime, tag, cipherForChain, re
     // 4. system_program (Program<'info, System>)
     const keys = [
         { pubkey: crushPda, isSigner: false, isWritable: true },
-        { pubkey: new PublicKey(pkPrime), isSigner: true, isWritable: false }, // user_signer (pkPrime)
+        { pubkey: new PublicKey(pkPrime), isSigner: true, isWritable: true }, // user_signer (pkPrime) -  MUT constraint violation fix
         { pubkey: new PublicKey(relayerB58PublicKey), isSigner: true, isWritable: true }, // relayer (rent and tx fee payer)
         { pubkey: SystemProgram.programId, isSigner: false, isWritable: false } 
     ];
@@ -984,26 +983,32 @@ function displayUserIndex(indexArray) {
         if (!indexArray || indexArray.length === 0) {
             list.innerHTML = '<li><p>No crushes sent yet. Find someone!</p></li>';
         } else {
-            indexArray.forEach(entry => {
+            // Sort the array: mutual first, then by timestamp descending
+            const sortedArray = [...indexArray].sort((a, b) => {
+                if (a.status === 'mutual' && b.status !== 'mutual') return -1;
+                if (a.status !== 'mutual' && b.status === 'mutual') return 1;
+                return (b.ts || 0) - (a.ts || 0); // Sort by timestamp descending
+            });
+
+            sortedArray.forEach(entry => {
                 const item = document.createElement('li');
-                item.setAttribute('data-tag', entry.tag); // For potential UI updates on mutual match
+                item.setAttribute('data-tag', entry.tag); 
                 item.style.border = "1px solid #eee";
                 item.style.padding = "10px";
                 item.style.marginBottom = "8px";
                 item.style.borderRadius = "5px";
                 if (entry.status === "mutual") {
-                    item.style.backgroundColor = '#e6ffe6'; // Light green for mutual
+                    item.style.backgroundColor = '#e6ffe6'; 
                 }
                 
                 const tagHexSnippet = entry.tag ? entry.tag.substring(0,16) : 'N/A';
-                const cipherMineBase64Snippet = entry.cipherMine ? entry.cipherMine.substring(0,16) : 'N/A';
                 item.innerHTML = `
                     <strong>Target FID:</strong> ${entry.targetFid || 'N/A'} <br>
                     <strong>Target Username:</strong> @${entry.targetUsername || 'N/A'} <br>
                     <strong>Status:</strong> ${entry.status || 'N/A'} ${entry.status === "mutual" ? `&#10024; <span class="mutual-info">${entry.revealedInfo || 'It\'s a Match!'}</span>` : ""} <br>
                     <strong>Timestamp:</strong> ${entry.ts ? new Date(entry.ts).toLocaleString() : 'N/A'} <br>
-                    <small>Tag (hex): ${tagHexSnippet}...</small><br>
-                    <small>Your Cipher (b64): ${cipherMineBase64Snippet}...</small>
+                    <small>Tag: ${tagHexSnippet}...</small><br>
+                    ${entry.txSignature ? `<small>Tx: <a href="https://explorer.solana.com/tx/${entry.txSignature}?cluster=mainnet" target="_blank" rel="noopener noreferrer">${entry.txSignature.substring(0,10)}...</a></small><br>` : '' }
                 `;
                 list.appendChild(item);
             });
@@ -1092,58 +1097,143 @@ async function handleSendCrush() {
         }
         const relayResult = await relayResponse.json();
         const finalTxSignature = relayResult.signature;
-        updateStatusMessage("Crush sent to relay! Transaction submitted.");
-        console.log(`  Relay successful! Final transaction signature: ${finalTxSignature}`);
-        
-        let currentIndexArray = [];
-        try {
-            const getResponse = await fetch(`${API_ROOT}/api/user/${sessionPublicKey}`);
-            if (getResponse.ok) {
-                const getData = await getResponse.json();
-                if (getData.encryptedIndex) {
-                    currentIndexArray = await decryptIndex(getData.encryptedIndex, sessionKIndex);
-                }
-            } else if (getResponse.status !== 404) { 
-                 console.warn("Error fetching user index before adding new crush, proceeding with empty list.");
-            }
-        } catch (fetchErr) {
-            console.warn("Network error fetching index before adding new crush, proceeding with empty list:", fetchErr);
-        }
 
-        const newCrushEntry = {
-            tag: bytesToHex(tag),
-            cipherMine: Buffer.from(cipherForChain).toString('base64'), 
-            status: "pending", 
-            ts: Date.now(),
-            targetFid: selectedTargetUser.fid,
-            targetUsername: selectedTargetUser.username,
-            K_AB_hex: bytesToHex(K_AB) 
+        const waitingForConfirmationMessage = `Transaction sent! Signature: ${finalTxSignature.substring(0,10)}... Waiting for confirmation...`;
+        if (searchResultsDiv) {
+            searchResultsDiv.innerHTML = `<p>${waitingForConfirmationMessage}</p><p><small>This may take a few moments. Please wait.</small></p>`;
+        } else {
+            updateStatusMessage(waitingForConfirmationMessage); 
+        }
+        console.log(`  Relay successful! Transaction signature: ${finalTxSignature}`);
+
+        // Client-side polling for transaction status
+        const POLLING_INTERVAL = 3000; // 3 seconds
+        const MAX_POLLING_ATTEMPTS = 20; // Poll for a maximum of 60 seconds (20 * 3s)
+        let pollingAttempts = 0;
+
+        let confirmationStatus = "pending_submission"; // Initial status after relay
+        let confirmationErrorDetail = null;
+        let uiMessage = waitingForConfirmationMessage;
+
+        const pollTransactionStatus = async () => {
+            pollingAttempts++;
+            console.log(`Polling attempt ${pollingAttempts} for tx: ${finalTxSignature}`);
+
+            try {
+                const statusResponse = await fetch(`${API_ROOT}/api/transaction-status?signature=${finalTxSignature}`);
+                if (!statusResponse.ok) {
+                    const errData = await statusResponse.json().catch(() => ({}));
+                    throw new Error(`Transaction status check failed: ${errData.error || statusResponse.statusText}`);
+                }
+                const statusResult = await statusResponse.json();
+                console.log("Transaction status API response:", statusResult);
+
+                if (statusResult.status === 'confirmed' || statusResult.status === 'finalized') {
+                    updateStatusMessage("Transaction confirmed on-chain! Processing crush details...");
+                    console.log(`Transaction ${finalTxSignature} successfully confirmed (${statusResult.status}).`);
+                    confirmationStatus = "pending"; // Still "pending" for PDA check, but client-side confirmed.
+                    uiMessage = `Crush sent and confirmed on Solana! Tx: <a href="https://explorer.solana.com/tx/${finalTxSignature}?cluster=mainnet" target="_blank" rel="noopener noreferrer">${finalTxSignature.substring(0,10)}...</a>`;
+                    clearInterval(pollingIntervalId);
+                    await finalizeCrushSubmission(true); 
+                } else if (statusResult.status === 'failed') {
+                    console.error(`Transaction ${finalTxSignature} failed:`, statusResult.error);
+                    updateStatusMessage(`Transaction ${finalTxSignature.substring(0,10)}... FAILED on-chain.`, true);
+                    confirmationStatus = "failed_on_chain";
+                    confirmationErrorDetail = JSON.stringify(statusResult.error);
+                    uiMessage = `Crush FAILED to process on Solana. Tx: <a href="https://explorer.solana.com/tx/${finalTxSignature}?cluster=mainnet" target="_blank" rel="noopener noreferrer">${finalTxSignature.substring(0,10)}...</a>. Error: ${confirmationErrorDetail}`;
+                    clearInterval(pollingIntervalId);
+                    await finalizeCrushSubmission(false); 
+                } else if (pollingAttempts >= MAX_POLLING_ATTEMPTS) {
+                    console.warn(`Transaction ${finalTxSignature} confirmation timed out after ${MAX_POLLING_ATTEMPTS} attempts.`);
+                    updateStatusMessage(`Transaction ${finalTxSignature.substring(0,10)}... confirmation timed out. It might still succeed. Check explorer.`, true);
+                    confirmationStatus = "pending_confirmation_timeout";
+                    confirmationErrorDetail = "Confirmation polling timed out.";
+                    uiMessage = `Crush sent (Tx: <a href="https://explorer.solana.com/tx/${finalTxSignature}?cluster=mainnet" target="_blank" rel="noopener noreferrer">${finalTxSignature.substring(0,10)}...</a>), but confirmation polling timed out. It may process on-chain shortly.`;
+                    clearInterval(pollingIntervalId);
+                    await finalizeCrushSubmission(false); 
+                } else {
+                    // Status is 'pending', 'processed', or 'notFound', so continue polling
+                    updateStatusMessage(`Transaction ${finalTxSignature.substring(0,10)}... Status: ${statusResult.status || 'pending'}. Waiting... (${pollingAttempts}/${MAX_POLLING_ATTEMPTS})`);
+                }
+            } catch (err) {
+                console.error(`Error during polling for tx ${finalTxSignature}:`, err);
+                // Don't stop polling for transient network errors, unless max attempts reached
+                if (pollingAttempts >= MAX_POLLING_ATTEMPTS) {
+                    updateStatusMessage(`Error checking transaction status for ${finalTxSignature.substring(0,10)}... Max attempts reached.`, true);
+                    confirmationStatus = "pending_polling_error";
+                    if (err.message && err.message.includes("was not confirmed in 30.00 seconds")) {
+                        confirmationErrorDetail = "Confirmation timed out (30s).";
+                    } else {
+                        confirmationErrorDetail = err.message;
+                    }
+                    uiMessage = `Crush sent (Tx: <a href="https://explorer.solana.com/tx/${finalTxSignature}?cluster=mainnet" target="_blank" rel="noopener noreferrer">${finalTxSignature.substring(0,10)}...</a>), but an error occurred while checking status.`;
+                    clearInterval(pollingIntervalId);
+                    await finalizeCrushSubmission(false); 
+                }
+            }
         };
 
-        const existingEntryIndex = currentIndexArray.findIndex(entry => entry.tag === newCrushEntry.tag);
-        if (existingEntryIndex > -1) currentIndexArray[existingEntryIndex] = newCrushEntry;
-        else currentIndexArray.push(newCrushEntry);
-        
-        const updateSuccess = await updateUserIndexOnApi(currentIndexArray);
+        const finalizeCrushSubmission = async (isConfirmed) => {
+            let currentIndexArray = [];
+            try {
+                const getResponse = await fetch(`${API_ROOT}/api/user/${sessionPublicKey}`);
+                if (getResponse.ok) {
+                    const getData = await getResponse.json();
+                    if (getData.encryptedIndex) {
+                        currentIndexArray = await decryptIndex(getData.encryptedIndex, sessionKIndex);
+                    }
+                } else if (getResponse.status !== 404) { 
+                     console.warn("Error fetching user index before adding new crush, proceeding with empty list.");
+                }
+            } catch (fetchErr) {
+                console.warn("Network error fetching index before adding new crush, proceeding with empty list:", fetchErr);
+            }
+    
+            const newCrushEntry = {
+                tag: bytesToHex(tag),
+                cipherMine: Buffer.from(cipherForChain).toString('base64'), 
+                status: confirmationStatus, 
+                ts: Date.now(),
+                targetFid: selectedTargetUser.fid,
+                targetUsername: selectedTargetUser.username,
+                K_AB_hex: bytesToHex(K_AB),
+                txSignature: finalTxSignature, 
+                confirmationError: confirmationErrorDetail 
+            };
+    
+            const existingEntryIndex = currentIndexArray.findIndex(entry => entry.tag === newCrushEntry.tag);
+            if (existingEntryIndex > -1) currentIndexArray[existingEntryIndex] = newCrushEntry;
+            else currentIndexArray.push(newCrushEntry);
+            
+            const updateSuccess = await updateUserIndexOnApi(currentIndexArray);
+    
+            if(searchResultsDiv) {
+                let finalUiColor = 'green';
+                if (confirmationStatus.startsWith('pending_') || confirmationStatus === 'failed_on_chain') {
+                    finalUiColor = 'orange';
+                } 
+                if (confirmationStatus === 'failed_on_chain') finalUiColor = 'red';
 
-        if(searchResultsDiv) {
-            searchResultsDiv.innerHTML = `
-                <div style="padding: 15px;">
-                    <p style="color: green; font-weight: bold; font-size: 1.1em;">Crush Sent to ${selectedTargetUser.display_name}!</p>
-                    <p style="font-size: 0.9em; margin-top: 10px;">Tx Signature: <a href="https://explorer.solana.com/tx/${finalTxSignature}?cluster=mainnet" target="_blank" rel="noopener noreferrer">${finalTxSignature.substring(0,10)}...</a></p>
-                    <p style="font-size: 0.8em; margin-top: 5px;">${updateSuccess ? "Your crush list has been updated on server." : "Failed to update crush list on server."}</p>
-                    <button id="searchAgainAfterCrushBtn" style="margin-top: 15px;">Send Another Crush</button>
-                </div>
-            `;
-            document.getElementById('searchAgainAfterCrushBtn').addEventListener('click', () => {
-                document.getElementById('userSearchInput').value = '';
-                searchResultsDiv.innerHTML = ''; 
-                searchResultsDiv.classList.remove('populated');
-                selectedTargetUser = null; 
-            });
-        } else {
-             updateStatusMessage("Crush sent! Tx: " + finalTxSignature.substring(0,10) + "...");
-        }
+                searchResultsDiv.innerHTML = `
+                    <div style="padding: 15px;">
+                        <p style="color: ${finalUiColor}; font-weight: bold; font-size: 1.1em;">${uiMessage.includes("confirmed") || uiMessage.includes("finalized") ? `Crush Sent to ${selectedTargetUser.display_name}!` : (uiMessage.includes("FAILED") ? "Crush Failed" : "Crush Sent (Status Pending)")}</p>
+                        <p style="font-size: 0.9em; margin-top: 10px;">${uiMessage}</p>
+                        <button id="searchAgainAfterCrushBtn" style="margin-top: 15px;">Send Another Crush</button>
+                    </div>
+                `;
+                document.getElementById('searchAgainAfterCrushBtn').addEventListener('click', () => {
+                    document.getElementById('userSearchInput').value = '';
+                    searchResultsDiv.innerHTML = ''; 
+                    searchResultsDiv.classList.remove('populated');
+                    selectedTargetUser = null; 
+                });
+            } else {
+                 updateStatusMessage(uiMessage, confirmationStatus.includes('fail') || confirmationStatus.includes('error'));
+            }
+        };
+
+        const pollingIntervalId = setInterval(pollTransactionStatus, POLLING_INTERVAL);
+        pollTransactionStatus(); // Initial call
 
     } catch (error) {
         console.error("Error during crush sequence (crypto or relay):", error);

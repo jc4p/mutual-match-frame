@@ -12,6 +12,10 @@
   -moz-osx-font-smoothing: grayscale;
 }
 
+#statusMessage {
+  display: none;
+}
+
 a {
   font-weight: 500;
   color: #646cff;

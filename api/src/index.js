@@ -111,7 +111,7 @@ app.post('/api/solana-rpc', async (c) => {
 	}
 
 	try {
-		console.log(`Proxying RPC request to: ${ALCHEMY_SOLANA_RPC_URL}`/*, JSON.stringify(requestBody)*/); // Avoid logging potentially large bodies unless debugging
+		// console.log(`Proxying RPC request to: ${ALCHEMY_SOLANA_RPC_URL}`/*, JSON.stringify(requestBody)*/); // Avoid logging potentially large bodies unless debugging
 
 		const alchemyResponse = await fetch(ALCHEMY_SOLANA_RPC_URL, {
 			method: 'POST',
@@ -136,7 +136,7 @@ app.post('/api/solana-rpc', async (c) => {
 		// Add other important headers from alchemyResponse if necessary, e.g., cache-control, etc.
 
 		// Log status for debugging
-		console.log(`Alchemy response status: ${alchemyResponse.status}`);
+		// console.log(`Alchemy response status: ${alchemyResponse.status}`);
 
 		return new Response(alchemyResponseBody, {
 			status: alchemyResponse.status,
@@ -181,7 +181,7 @@ app.post('/api/relay', async (c) => {
             return c.json({ error: 'Invalid or missing transaction string in request body.' }, 400);
         }
 
-        console.log('Relay: Received base64 transaction string for new relay logic.');
+        // console.log('Relay: Received base64 transaction string for new relay logic.');
 
         const transactionBuffer = Buffer.from(base64TransactionString, 'base64');
         let receivedTransaction;
@@ -197,21 +197,20 @@ app.post('/api/relay', async (c) => {
             } else {
                 receivedTransaction = Transaction.from(transactionBuffer);
             }
-            console.log('Relay: Successfully deserialized received transaction.');
+            // console.log('Relay: Successfully deserialized received transaction.');
         } catch (deserializeError) {
-            console.error('Relay: Failed to deserialize received transaction:', deserializeError);
+            // console.error('Relay: Failed to deserialize received transaction:', deserializeError);
             return c.json({ error: 'Failed to deserialize transaction.', details: deserializeError.message }, 400);
         }
 
         if (isReceivedVersioned) {
             // This simplified relay logic is primarily for legacy transactions where feePayer is set by client.
-            // Handling pre-signed versioned transactions for relayer fee payment is more complex.
-            console.error('Relay: Received a VersionedTransaction. This relay path is optimized for legacy transactions with client-set relayer feePayer.');
+            // console.error('Relay: Received a VersionedTransaction. This relay path is optimized for legacy transactions with client-set relayer feePayer.');
             return c.json({ error: 'Versioned transactions need a different relay handling for fee substitution.' }, 400);
         }
 
         // --- Start: New Relay Logic for Legacy Transactions ---
-        console.log('Relay: Applying new relay logic for legacy transaction.');
+        // console.log('Relay: Applying new relay logic for legacy transaction.');
 
         const relayerKeypair = Keypair.fromSeed(bs58.decode(RELAYER_KEY));
 
@@ -220,7 +219,7 @@ app.post('/api/relay', async (c) => {
             console.error(`Relay: Received transaction feePayer (${receivedTransaction.feePayer ? receivedTransaction.feePayer.toBase58() : 'null'}) does not match relayer public key (${relayerKeypair.publicKey.toBase58()}).`);
             return c.json({ error: 'Transaction feePayer mismatch. Client must set feePayer to relayer.' }, 400);
         }
-        console.log('Relay: Transaction feePayer matches relayer public key.');
+        // console.log('Relay: Transaction feePayer matches relayer public key.');
 
         // 2. Program ID and Instruction Count Checks (using the received transaction directly)
         if (!receivedTransaction.instructions || receivedTransaction.instructions.length !== 1) {
@@ -229,28 +228,64 @@ app.post('/api/relay', async (c) => {
         if (!receivedTransaction.instructions[0].programId.equals(new PublicKey(CRUSH_PROGRAM_ID))) {
             return c.json({ error: 'Instruction programId does not match CRUSH_PROGRAM_ID.' }, 400);
         }
-        console.log('Relay: Instruction programId and count checks passed.');
+        // console.log('Relay: Instruction programId and count checks passed.');
         
         // 3. (Crucial) Verify pkPrime's signature on the received transaction
         // The transaction message includes relayer as feePayer. pkPrime must have signed this specific message.
         const messageBytes = receivedTransaction.serializeMessage(); // Message with relayer as feePayer
 
-        // Find pkPrime's public key and signature from the transaction
-        // pkPrime is the one instruction signer that is NOT the relayer (feePayer)
+        // Identify pkPrime's public key and the relayer's public key from the instruction's signers.
+        // The instruction for submit_crush expects two signers:
+        // 1. user_signer (pkPrime)
+        // 2. relayer (which is also the transaction feePayer)
         let pkPrimePublicKey;
-        let pkPrimeSignature;
+        let instructionRelayerPublicKey;
 
-        const instructionSigners = receivedTransaction.instructions[0].keys.filter(k => k.isSigner);
-        if (instructionSigners.length !== 1) {
-             console.error('Relay: Expected exactly one signer in the instruction for pkPrime.');
-             // This assumes your instruction has only one other signer apart from potentially the feePayer if it were also a signer.
-             // Adjust if instruction has multiple client-side signers.
-             // For this specific app, pkPrime is the only instruction signer.
-             return c.json({ error: 'Instruction signer configuration error.'}, 400);
+        const instructionAccountMetas = receivedTransaction.instructions[0].keys;
+        const instructionSignerMetas = instructionAccountMetas.filter(k => k.isSigner);
+
+        if (instructionSignerMetas.length !== 2) {
+             console.error(`Relay: Expected exactly two signers in the instruction's accounts. Found ${instructionSignerMetas.length}.`);
+             return c.json({ error: 'Instruction signer configuration error: Incorrect number of signers in instruction accounts.'}, 400);
         }
-        pkPrimePublicKey = instructionSigners[0].pubkey;
 
+        // Iterate through the signers in the instruction to identify pkPrime and the relayer
+        // pkPrime is the signer that is NOT the overall transaction feePayer (relayerKeypair.publicKey)
+        // The other signer in the instruction MUST be the relayerKeypair.publicKey
+        let foundPkPrime = false;
+        let foundInstructionRelayer = false;
+
+        for (const signerMeta of instructionSignerMetas) {
+            if (signerMeta.pubkey.equals(relayerKeypair.publicKey)) {
+                instructionRelayerPublicKey = signerMeta.pubkey;
+                foundInstructionRelayer = true;
+            } else {
+                // This must be pkPrime
+                if (pkPrimePublicKey) { // Should not find a second non-relayer signer
+                    console.error('Relay: Found multiple potential pkPrime signers in the instruction.');
+                    return c.json({ error: 'Instruction signer configuration error: Ambiguous pkPrime.' }, 400);
+                }
+                pkPrimePublicKey = signerMeta.pubkey;
+                foundPkPrime = true;
+            }
+        }
+
+        if (!foundPkPrime) {
+            console.error('Relay: pkPrime (user_signer) not found as a signer in the instruction accounts.');
+            return c.json({ error: 'Instruction signer configuration error: pkPrime missing from instruction signers.' }, 400);
+        }
+        if (!foundInstructionRelayer) {
+            console.error('Relay: Relayer not found as a signer in the instruction accounts, but was expected.');
+            // This case should ideally be caught if feePayer is relayer and instruction has 2 signers, one of which isn't relayer.
+            // Adding for robustness.
+            return c.json({ error: 'Instruction signer configuration error: Relayer missing from instruction signers.' }, 400);
+        }
+        
+        // console.log(`Relay: Identified pkPrimePublicKey: ${pkPrimePublicKey.toBase58()} and instructionRelayerPublicKey: ${instructionRelayerPublicKey.toBase58()}`);
+
+        // Find pkPrime's signature on the overall transaction
         const pkPrimeSignatureEntry = receivedTransaction.signatures.find(s => s.publicKey.equals(pkPrimePublicKey));
+        let pkPrimeSignature;
 
         if (!pkPrimeSignatureEntry || !pkPrimeSignatureEntry.signature) {
             console.error(`Relay: Signature for pkPrime (${pkPrimePublicKey.toBase58()}) not found on received transaction.`);
@@ -262,38 +297,38 @@ app.post('/api/relay', async (c) => {
         // Note: @noble/ed25519 verify function expects Uint8Array for signature and message.
         // PublicKey.toBytes() gives Uint8Array. pkPrimeSignature is already Buffer/Uint8Array.
         // We need the raw public key bytes for noble's ed25519.verify
-        const { ed25519 } = await import('@noble/curves/ed25519'); // Ensure noble ed25519 is available
+        const { ed25519 } = await import('@noble/curves/ed25519');
         if (!ed25519.verify(pkPrimeSignature, messageBytes, pkPrimePublicKey.toBytes())) {
            console.error("Relay: pkPrime's signature verification failed for the received transaction message (relayer as feePayer).");
-           console.log("pkPrime public key for sig verify:", pkPrimePublicKey.toBase58());
+        //    console.log("pkPrime public key for sig verify:", pkPrimePublicKey.toBase58());
            // console.log("pkPrime signature for sig verify (b64):", Buffer.from(pkPrimeSignature).toString('base64'));
            // console.log("Message bytes for sig verify (hex):", Buffer.from(messageBytes).toString('hex'));
            return c.json({ error: "Invalid user signature on transaction." }, 400);
         }
-        console.log("Relay: pkPrime's signature on received transaction (with relayer as feePayer) VERIFIED.");
+        // console.log("Relay: pkPrime's signature on received transaction (with relayer as feePayer) VERIFIED.");
 
         // 4. Relayer adds its signature (as feePayer)
         // The transaction already has relayer as feePayer and pkPrime's signature.
         // Relayer's signature slot should be null or require signing.
-        console.log('Relay: Relayer signing the transaction (as feePayer)...');
+        // console.log('Relay: Relayer signing the transaction (as feePayer)...');
         receivedTransaction.partialSign(relayerKeypair); 
         // partialSign is appropriate as pkPrime's signature is already there.
         // It will fill the signature slot for relayerKeypair.publicKey.
         
-        console.log('Relay: Signatures after relayer signs:', JSON.stringify(receivedTransaction.signatures.map(sig => ({ 
-            publicKey: sig.publicKey.toBase58(), 
-            signature: sig.signature ? Buffer.from(sig.signature).toString('base64') : null
-        })), null, 2));
+        // console.log('Relay: Signatures after relayer signs:', JSON.stringify(receivedTransaction.signatures.map(sig => ({ 
+        //     publicKey: sig.publicKey.toBase58(), 
+        //     signature: sig.signature ? Buffer.from(sig.signature).toString('base64') : null
+        // })), null, 2));
 
         // 5. Serialize the fully signed transaction for sending
         // Default `serialize()` options: requireAllSignatures: true, verifySignatures: true
         // This will internally verify all signatures again.
         let finalTxBuffer;
         try {
-            console.log('Relay: Serializing final transaction (will verify all signatures)...');
+            // console.log('Relay: Serializing final transaction (will verify all signatures)...');
             finalTxBuffer = receivedTransaction.serialize();
         } catch (serializeError) {
-            console.error('Relay: Error serializing final transaction:', serializeError);
+            // console.error('Relay: Error serializing final transaction:', serializeError);
             // Log signatures again if serialization fails
             if (receivedTransaction.signatures) {
                 console.log('Relay: Signatures at time of serialization failure:', JSON.stringify(receivedTransaction.signatures.map(sig => ({ 
@@ -303,11 +338,11 @@ app.post('/api/relay', async (c) => {
             }
             return c.json({ error: 'Failed to serialize final transaction.', details: serializeError.message }, 500);
         }
-        console.log('Relay: Final transaction serialized successfully.');
+        // console.log('Relay: Final transaction serialized successfully.');
         // --- End: New Relay Logic ---
         
         const connection = new Connection(ALCHEMY_SOLANA_RPC_URL, 'confirmed');
-        console.log('Relay: Sending final transaction to Solana network...');
+        // console.log('Relay: Sending final transaction to Solana network...');
         let signature;
         try {
             // Send the fully signed and verified (by serialize()) transaction buffer
@@ -339,29 +374,9 @@ app.post('/api/relay', async (c) => {
                 }, 500);
             }
         }
-        console.log(`Relay: Transaction sent. Signature: ${signature}`);
+        // console.log(`Relay: Transaction sent. Signature: ${signature}`);
 
-        // 7. Confirm the transaction (optional but good for relay)
-        console.log('Relay: Confirming transaction...');
-        try {
-            const confirmation = await connection.confirmTransaction(signature, 'confirmed');
-            console.log('Relay: Transaction confirmation: ', confirmation);
-            if (confirmation.value.err) {
-                throw new Error(`Solana transaction confirmation failed: ${JSON.stringify(confirmation.value.err)}`);
-            }
-        } catch (confirmError) {
-            console.error('Relay: Transaction confirmation failed.', confirmError);
-            // Even if confirmation times out or fails, the tx might have landed. 
-            // For a relayer, often returning the signature is enough once sent.
-            // Depending on UX, might want to inform user about confirmation status uncertainty.
-            return c.json({ 
-                warning: 'Transaction sent but confirmation failed or timed out.', 
-                signature: signature,
-                details: confirmError.message 
-            }, 202); // 202 Accepted, as tx was sent
-        }
-
-        // 8. Return the signature
+        // 8. Return the signature immediately after sending
         return c.json({ signature });
 
     } catch (error) {
@@ -426,53 +441,6 @@ app.put('/api/user/:wallet', async (c) => {
         return c.json({ error: 'encryptedIndex (string) is required in request body.' }, 400);
     }
 
-    /*
-    // --- PRD Authorization Requirement (Section 5.2) ---
-    // This section implements the Authorization: Wallet <sig> header check.
-    // It requires the client to sign the SHA256 hash of the request body.
-    const authHeader = c.req.header('Authorization');
-    if (!authHeader || !authHeader.startsWith('Wallet ')) {
-        return c.json({ error: 'Missing or invalid Authorization header. Expected \'Wallet <signature>\'.' }, 401);
-    }
-    const signatureB64 = authHeader.substring('Wallet '.length);
-    try {
-        const signature = Buffer.from(signatureB64, 'base64');
-        const messageToVerify = Buffer.from(JSON.stringify(requestBody)); // Body to hash and verify against
-        const messageHash = sha256(messageToVerify); // sha256 from @noble/hashes
-
-        const userPublicKey = new PublicKey(walletAddress);
-        
-        // web3.js verify expects Uint8Array for signature and message
-        // noble/ed25519.verify might be an alternative if web3.js verify isn't available or suitable in Worker
-        // For now, assuming a hypothetical verify function compatible with web3.js PublicKey objects and noble hashes/signatures
-        // This part is tricky as direct ed25519 verify against a PublicKey object might need careful handling of types.
-        // Using noble/ed25519.verify is more straightforward if we have the public key bytes directly.
-        // Since walletAddress is string, we convert to PublicKey, then to Uint8Array for noble.
-        
-        // A more direct approach with noble/ed25519 if userPublicKey.toBytes() is available:
-        // const ed25519 = await import('@noble/curves/ed25519').then(m => m.ed25519);
-        // const isValid = ed25519.verify(signature, messageHash, userPublicKey.toBytes()); 
-
-        // Placeholder for actual verification logic. This needs to be robust.
-        // This is a simplified example and might need adjustment for how the signature is generated/verified.
-        // For instance, @solana/web3.js `nacl.sign.detached.verify` could be used if nacl is available or shimmed.
-        // Or using noble/ed25519.verify if the public key bytes are correctly obtained.
-        
-        // For now, let's assume verification is complex to set up here without more context on client-side signing
-        // and skip actual verification for this iteration, logging a TODO.
-        console.warn(`TODO: Implement robust Authorization header signature verification for PUT /api/user/${walletAddress}`)
-        // if (!isValid) {
-        //     return c.json({ error: 'Invalid signature for Authorization header.' }, 403);
-        // }
-        // console.log(`PUT /api/user/${walletAddress}: Authorization signature VERIFIED.`);
-
-    } catch (sigError) {
-        console.error(`Error during signature verification for ${walletAddress}:`, sigError);
-        return c.json({ error: 'Signature verification failed.', details: sigError.message }, 401);
-    }
-    // --- End PRD Authorization Requirement ---
-    */
-
     try {
         console.log(`PUT /api/user/${walletAddress}: Storing index (length ${encryptedIndex.length}).`);
         await USER_INDEX_KV.put(walletAddress, encryptedIndex);
@@ -488,6 +456,70 @@ app.put('/api/user/:wallet', async (c) => {
 // PRD 5.2: /health endpoint
 app.get('/api/health', (c) => {
     return c.json({ status: 'OK', timestamp: new Date().toISOString() });
+});
+
+// New endpoint for the client to poll transaction status
+app.get('/api/transaction-status', async (c) => {
+    const { ALCHEMY_SOLANA_RPC_URL } = c.env;
+    if (!ALCHEMY_SOLANA_RPC_URL) {
+        console.error('ALCHEMY_SOLANA_RPC_URL not configured for transaction-status check.');
+        return c.json({ error: 'Service not configured' }, 500);
+    }
+
+    const signature = c.req.query('signature');
+    if (!signature) {
+        return c.json({ error: 'Missing \'signature\' query parameter' }, 400);
+    }
+
+    try {
+        const connection = new Connection(ALCHEMY_SOLANA_RPC_URL, 'confirmed');
+        console.log(`Polling status for signature: ${signature}`);
+        
+        // getSignatureStatuses takes an array of signatures
+        const result = await connection.getSignatureStatus(signature, {
+            searchTransactionHistory: true, // Important for finding older transactions
+        });
+
+        console.log(`Signature status for ${signature}:`, JSON.stringify(result, null, 2));
+
+        if (!result) {
+            // Signature not found, could be still processing or never landed
+            return c.json({ signature, status: 'notFound' });
+        }
+
+        let simplifiedStatus = 'pending'; // Default assumption
+        if (result.value) {
+            if (result.value.err) {
+                simplifiedStatus = 'failed';
+                return c.json({ 
+                    signature, 
+                    status: simplifiedStatus, 
+                    error: result.value.err, 
+                    confirmationStatus: result.value.confirmationStatus 
+                });
+            }
+            // Possible confirmation statuses: 'processed', 'confirmed', 'finalized'
+            if (result.value.confirmationStatus === 'finalized') {
+                simplifiedStatus = 'finalized';
+            } else if (result.value.confirmationStatus === 'confirmed') {
+                simplifiedStatus = 'confirmed';
+            } else if (result.value.confirmationStatus === 'processed') {
+                simplifiedStatus = 'processed';
+            }
+            return c.json({ 
+                signature, 
+                status: simplifiedStatus, 
+                confirmationStatus: result.value.confirmationStatus 
+            });
+        } else {
+             // Fallback if result.value is null but result itself is not (should be caught by !result earlier)
+            return c.json({ signature, status: 'notFoundOrPending' });
+        }
+
+    } catch (error) {
+        console.error(`Error fetching transaction status for ${signature}:`, error);
+        return c.json({ error: 'Failed to fetch transaction status', details: error.message }, 500);
+    }
 });
 
 export default app;
