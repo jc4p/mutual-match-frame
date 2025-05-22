@@ -399,20 +399,64 @@ app.get('/api/user/:wallet', async (c) => {
     }
 
     try {
-        console.log(`GET /api/user/${walletAddress}: Fetching index.`);
-        const encryptedIndex = await USER_INDEX_KV.get(walletAddress);
+        console.log(`GET /api/user/${walletAddress}: Fetching user data.`);
+        // User data might include encryptedIndex and appPublicKeyHex
+        const userDataString = await USER_INDEX_KV.get(walletAddress);
 
-        if (encryptedIndex === null) {
-            console.log(`GET /api/user/${walletAddress}: No index found.`);
-            // Return an empty string or a specific structure if preferred by client for "not found"
-            return c.json({ encryptedIndex: null }); 
+        if (userDataString === null) {
+            console.log(`GET /api/user/${walletAddress}: No data found.`);
+            return c.json({ encryptedIndex: null, appPublicKeyHex: null }, 404); // Return 404 and specific structure
         }
-        console.log(`GET /api/user/${walletAddress}: Found index (length ${encryptedIndex.length}).`);
-        return c.json({ encryptedIndex });
+        
+        const userData = JSON.parse(userDataString); // Assuming stored as JSON string
+        console.log(`GET /api/user/${walletAddress}: Found user data.`);
+        return c.json({ 
+            encryptedIndex: userData.encryptedIndex || null,
+            appPublicKeyHex: userData.appPublicKeyHex || null 
+        });
 
     } catch (error) {
-        console.error(`Error getting user index for ${walletAddress}:`, error);
-        return c.json({ error: 'Failed to retrieve user index.', details: error.message }, 500);
+        console.error(`Error getting user data for ${walletAddress}:`, error);
+        // If JSON parsing fails or other error
+        if (error instanceof SyntaxError) {
+            console.warn(`GET /api/user/${walletAddress}: Data found but couldn't parse as JSON. Returning raw string if it exists or null.`);
+            // Attempt to return raw if it was a string, otherwise indicate error.
+            // This path is tricky; ideally, data is always valid JSON or null.
+            // For now, let's assume if it's not JSON, it's an older format or corrupted.
+             const rawDataFallback = await USER_INDEX_KV.get(walletAddress); // re-fetch raw
+             if (rawDataFallback && typeof rawDataFallback === 'string' && !rawDataFallback.startsWith('{')) {
+                // If it looks like an old encryptedIndex string (not JSON)
+                console.log(`GET /api/user/${walletAddress}: Returning raw data as likely old format encryptedIndex.`);
+                return c.json({ encryptedIndex: rawDataFallback, appPublicKeyHex: null });
+             }
+        }
+        return c.json({ error: 'Failed to retrieve or parse user data.', details: error.message }, 500);
+    }
+});
+
+// New endpoint to get just the app public key
+app.get('/api/user/:wallet/app-pubkey', async (c) => {
+    const { USER_INDEX_KV } = c.env;
+    if (!USER_INDEX_KV) {
+        return c.json({ error: 'User index service not configured.' }, 500);
+    }
+    const walletAddress = c.req.param('wallet');
+    if (!walletAddress) {
+        return c.json({ error: 'Wallet address parameter is required.' }, 400);
+    }
+    try {
+        const userDataString = await USER_INDEX_KV.get(walletAddress);
+        if (userDataString === null) {
+            return c.json({ error: 'User not found or app key not set.' }, 404);
+        }
+        const userData = JSON.parse(userDataString);
+        if (!userData.appPublicKeyHex) {
+            return c.json({ error: 'App public key not set for this user.' }, 404);
+        }
+        return c.json({ appPublicKeyHex: userData.appPublicKeyHex });
+    } catch (error) {
+        console.error(`Error getting app public key for ${walletAddress}:`, error);
+        return c.json({ error: 'Failed to retrieve app public key.', details: error.message }, 500);
     }
 });
 
@@ -436,20 +480,61 @@ app.put('/api/user/:wallet', async (c) => {
         return c.json({ error: 'Invalid JSON request body.' }, 400);
     }
 
-    const { encryptedIndex } = requestBody;
-    if (typeof encryptedIndex !== 'string') {
-        return c.json({ error: 'encryptedIndex (string) is required in request body.' }, 400);
+    const { encryptedIndex, appPublicKeyHex } = requestBody;
+
+    // Validate inputs: encryptedIndex can be null if only updating appPublicKeyHex,
+    // and appPublicKeyHex can be null if only updating encryptedIndex.
+    // However, at least one should be present for a meaningful PUT.
+    // For this app, encryptedIndex is typically a string. appPublicKeyHex is also a string.
+    if (typeof encryptedIndex !== 'string' && encryptedIndex !== null && encryptedIndex !== undefined) {
+        return c.json({ error: 'encryptedIndex must be a string or null.' }, 400);
+    }
+    if (typeof appPublicKeyHex !== 'string' && appPublicKeyHex !== null && appPublicKeyHex !== undefined) {
+        return c.json({ error: 'appPublicKeyHex must be a string or null.' }, 400);
+    }
+    if ((encryptedIndex === null || encryptedIndex === undefined) && (appPublicKeyHex === null || appPublicKeyHex === undefined)) {
+         return c.json({ error: 'Either encryptedIndex or appPublicKeyHex must be provided.' }, 400);
     }
 
+
     try {
-        console.log(`PUT /api/user/${walletAddress}: Storing index (length ${encryptedIndex.length}).`);
-        await USER_INDEX_KV.put(walletAddress, encryptedIndex);
-        console.log(`PUT /api/user/${walletAddress}: Index stored successfully.`);
-        return c.json({ success: true, message: 'User index updated.' });
+        // Fetch existing data to merge, or start fresh
+        let existingData = {};
+        const existingDataString = await USER_INDEX_KV.get(walletAddress);
+        if (existingDataString) {
+            try {
+                existingData = JSON.parse(existingDataString);
+            } catch (e) {
+                // If existing data is not JSON (e.g., old format, just a string for encryptedIndex)
+                // Treat it as if only encryptedIndex was stored.
+                if (typeof existingDataString === 'string' && !existingDataString.startsWith('{')) {
+                    console.warn(`PUT /api/user/${walletAddress}: Existing data is not JSON, treating as old encryptedIndex string.`);
+                    existingData = { encryptedIndex: existingDataString, appPublicKeyHex: null };
+                } else {
+                    console.error(`PUT /api/user/${walletAddress}: Failed to parse existing JSON data. Overwriting might occur if not careful. Error: ${e.message}`);
+                    // Decide on a strategy: error out, or overwrite. For now, let's allow targeted update.
+                    existingData = {}; // Reset to avoid partial corruption if parsing failed badly
+                }
+            }
+        }
+        
+        // Update fields if provided in the request
+        const dataToStore = { ...existingData };
+        if (encryptedIndex !== undefined) { // Allows explicit null to clear
+            dataToStore.encryptedIndex = encryptedIndex;
+        }
+        if (appPublicKeyHex !== undefined) { // Allows explicit null to clear
+            dataToStore.appPublicKeyHex = appPublicKeyHex;
+        }
+
+        console.log(`PUT /api/user/${walletAddress}: Storing user data:`, JSON.stringify(dataToStore));
+        await USER_INDEX_KV.put(walletAddress, JSON.stringify(dataToStore));
+        console.log(`PUT /api/user/${walletAddress}: User data stored successfully.`);
+        return c.json({ success: true, message: 'User data updated.' });
 
     } catch (error) {
-        console.error(`Error putting user index for ${walletAddress}:`, error);
-        return c.json({ error: 'Failed to update user index.', details: error.message }, 500);
+        console.error(`Error putting user data for ${walletAddress}:`, error);
+        return c.json({ error: 'Failed to update user data.', details: error.message }, 500);
     }
 });
 

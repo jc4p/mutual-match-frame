@@ -189,6 +189,7 @@ function initDebugConsole() {
 let sessionKWallet = null;
 let sessionKIndex = null; // Will be derived from kWallet
 let sessionPublicKey = null; // This will be set after successful signing
+let sessionAppPublicKeyHex = null; // Hex string of the app-specific public key derived from kWallet
 let selectedTargetUser = null; // To store { fid, username, display_name, pfp_url, primary_sol_address }
 let relayerPublicKeyString = null; // Variable to store relayer's public key
 
@@ -404,6 +405,11 @@ async function performSignatureAndSetup(provider, publicKeyStrToSignWith) {
         const hotPrefix = utf8ToBytes("HOT");
         sessionKIndex = sha256(concatBytes(hotPrefix, sessionKWallet));
 
+        // Derive and store app-specific public key
+        const appSpecificPublicKeyBytes = ed25519.getPublicKey(sessionKWallet);
+        sessionAppPublicKeyHex = bytesToHex(appSpecificPublicKeyBytes);
+        console.log('App-specific Public Key (hex):', sessionAppPublicKeyHex);
+
         console.log('Raw signature (first 16 bytes hex): ', bytesToHex(signature.slice(0,16)));
         console.log('kWallet (hex, first 8 bytes):', bytesToHex(sessionKWallet.slice(0,8)));
         console.log('kIndex (hex, first 8 bytes):', bytesToHex(sessionKIndex.slice(0,8)));
@@ -424,8 +430,15 @@ async function performSignatureAndSetup(provider, publicKeyStrToSignWith) {
 
         await loadAndDisplayUserIndex();
         await fetchRelayerPublicKey(); // Fetch relayer key after successful sign-in
+        
+        // After successful sign-in and key derivation, update the server with the app public key
+        // This might also be a good place to initially fetch/create the user record if it doesn't exist.
+        // We'll use a combined function to update index and app key.
+        console.log("Attempting to register app public key with server...");
+        const initialIndexData = await getDecryptedUserIndexFromServer(); // Get current index, or empty array
+        await updateUserIndexAndAppKeyOnApi(initialIndexData, sessionAppPublicKeyHex);
 
-        return { kWallet: sessionKWallet, publicKey: sessionPublicKey, kIndex: sessionKIndex };
+        return { kWallet: sessionKWallet, publicKey: sessionPublicKey, kIndex: sessionKIndex, appPublicKeyHex: sessionAppPublicKeyHex };
 
     } catch (error) {
         console.error("Error in performSignatureAndSetup process:", error);
@@ -436,6 +449,7 @@ async function performSignatureAndSetup(provider, publicKeyStrToSignWith) {
         sessionPublicKey = null;
         sessionKIndex = null;
         userPublicKeyString = null; // Clear connected public key as well
+        sessionAppPublicKeyHex = null; // Clear app public key hex
 
         if(contentDiv) contentDiv.innerHTML = `<p>Sign-in process failed. See console for details. <button id="getStartedBtn">Try Again</button></p>`;
         
@@ -477,8 +491,8 @@ function initializeApp() {
             <div id="statusMessage"><p>Ready.</p></div>
             <div id="content">
                 <h3>Private, secret, fully encrypted onchain crushes.</h3>
-                <p>You tell the Solana chain (securely!) who you like. They do the same. If there's a match you'll be notified.</p>
-                <p>Get started by connecting your wallet and generating app-specific keys.</p>
+                <p>Tell the Solana chain (securely!) who you like. If they like you back (and have also used this app once), you'll both be notified!</p>
+                <p><strong>To get started:</strong> Connect your wallet and sign a message. This generates your unique keys for this app. <br/>For a match to work, the person you're interested in must also have signed into this app at least once.</p>
                 <button id="getStartedBtn" disabled>Loading SDK...</button>
             </div>
         `;
@@ -503,29 +517,34 @@ function populateHowItWorksModal() {
         
         const contentHtml = `
         <p>Mutual Match allows Farcaster users to discreetly signal interest in someone. If the interest is mutual, both users are notified. Otherwise, your secret is safe!</p>
+        <p><strong>Important:</strong> For a mutual match to be detected, <strong>both you and the person you're interested in must have signed into Mutual Match at least once.</strong> This allows the app to generate the necessary secure keys for both of you.</p>
 
         <h3>How It Works</h3>
         <ul>
-            <li>✍️ <strong>Sign In:</strong> You sign a message with your wallet – this keeps your main Farcaster account details separate and generates a special key for this app.</li>
-            <li>🤫 <strong>Express a Crush:</strong> You pick someone you follow. The app uses clever cryptography to prepare your 'crush' message.</li>
-            <li>🔒 <strong>Encryption Magic:</strong> Your choice is encrypted using keys that only you and your potential crush can generate if you <em>both</em> express interest. The server or anyone else can't read it.</li>
-            <li>🔗 <strong>Onchain (but private!):</strong> An encrypted piece of data is sent to the Solana blockchain. This data doesn't reveal who you are or who you crushed on.</li>
-            <li>🎉 <strong>Mutual Match:</strong> If the person you crushed on also crushes on you using this app, the system detects a match! Both of you will be notified. Otherwise, your crush remains a secret.</li>
+            <li>✍️ <strong>Sign In & Key Generation:</strong> When you first sign in with your wallet, the app generates a unique, app-specific private and public key pair. Your app-specific public key is registered with our server, associated with your main wallet address. This key is different from your main wallet key and is only used for Mutual Match.</li>
+            <li>🎯 <strong>Select Your Crush:</strong> You search for and select a Farcaster user.</li>
+            <li>🔑 <strong>Symmetric Secret:</strong> If your selected crush has also signed into Mutual Match at least once (meaning their app-specific public key is registered), your app and their app can independently derive a secret shared cryptographic key. This key is identical for both of you for this specific pairing.</li>
+            <li>🤫 <strong>Express a Crush:</strong> Your app uses this shared secret to generate a unique "tag" (like a secret mailbox address) and an encryption key. Your 'crush' message (which includes your Farcaster ID and their Farcaster ID) is then encrypted.</li>
+            <li>🔒 <strong>Encryption Magic:</strong> Your choice is encrypted using this symmetric key. Only someone who can generate the same key (i.e., your mutual crush, if they also use the app and crush on you) can decrypt it. The server cannot read it.</li>
+            <li>🔗 <strong>Onchain (but private!):</strong> An encrypted piece of data, along with the unique tag, is sent to the Solana blockchain. This data doesn't directly reveal who you are or who you crushed on to the public.</li>
+            <li>🎉 <strong>Mutual Match:</strong> If the person you crushed on also crushes on you using this app, their app will generate the *exact same tag* and *exact same encryption key*. They'll post their encrypted crush to the same on-chain "mailbox." The system then detects two messages in this shared spot, and both your apps can decrypt the other's message. Both of you will be notified of the mutual match! Otherwise, your crush remains a secret.</li>
         </ul>
 
         <h3>Security & Privacy</h3>
         <ul>
-            <li>🛡️ <strong>Stealthy Transactions:</strong> Your actual wallet address isn't directly linked to the onchain crush data. We use 'stealth keys' for this.</li>
-            <li>🔐 <strong>Server Can't Peek:</strong> The list of your crushes stored on our server is encrypted with a key derived from your initial wallet signature. We can't decrypt it.</li>
+            <li>🛡️ <strong>App-Specific Keys:</strong> Your main wallet's private key is never used directly for crush mechanics, only for the initial sign-in to generate your app-specific keys.</li>
+            <li>🗝️ <strong>Server Stores App Public Key:</strong> Our server stores your app-specific *public* key to enable others to initiate a crush sequence with you. Your app-specific *private* key (derived from your wallet signature) never leaves your device/browser session.</li>
+            <li>🔐 <strong>End-to-End Encryption for Matches:</strong> Only you and a mutual crush can decrypt the exchanged Farcaster IDs.</li>
             <li>🚫 <strong>Not <em>Technically</em> Zero-Knowledge:</strong> While we use strong encryption and privacy techniques, this system isn't strictly 'zero-knowledge' in the formal cryptographic sense. However, it's designed to be highly private and secure for its purpose.</li>
         </ul>
 
         <h3>Benefits</h3>
         <ul>
             <li>Discreet way to find mutual connections.</li>
-            <li>Strong encryption protects your choices.</li>
-            <li>Anonymous onchain interactions.</li>
+            <li>Strong, symmetric encryption protects your choices if there's a match.</li>
+            <li>Anonymous onchain interactions for crush submissions.</li>
         </ul>
+        <p><small>Note: If you previously used an older version of Mutual Match, crushes sent with that version may not be compatible with this new mutual matching system.</small></p>
         `;
         
         // Clear existing content except h2 and close button
@@ -682,8 +701,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 // sk' = seed
 // pk' = ed25519.getPublicKey(sk')
 async function deriveStealthKey(kWallet, edPubTargetBytes) {
-  console.log("deriveStealthKey: kWallet (hex, first 8B):", bytesToHex(kWallet.slice(0,8)));
-  console.log("deriveStealthKey: edPubTargetBytes (hex, first 8B):", bytesToHex(edPubTargetBytes.slice(0,8)));
+  console.log("deriveStealthKey (Directional for Tx Signing): kWallet (hex, first 8B):", bytesToHex(kWallet.slice(0,8)));
+  console.log("deriveStealthKey (Directional for Tx Signing): edPubTargetBytes (hex, first 8B):", bytesToHex(edPubTargetBytes.slice(0,8)));
 
   const seed = await hmac(sha256, kWallet, edPubTargetBytes); // HMAC-SHA256
   const skPrime = seed; // sk' is the seed itself (32 bytes from SHA256)
@@ -704,51 +723,65 @@ async function deriveStealthKey(kWallet, edPubTargetBytes) {
   return { skPrime, pkPrime };
 }
 
-// PRD 4.2: ECDH
-// convert edPubTarget -> xPubT, xPrivS = edToCurve(sk'), shared = scalarMult(xPrivS,xPubT)
-async function performECDH(skPrimeEd, edPubTargetBytes) {
-  // Convert Ed25519 private key (skPrimeEd) to X25519 private key (scalar)
-  const xPrivS = edwardsToMontgomeryPriv(skPrimeEd); // Using directly imported function
+// PRD 4.2: ECDH - MODIFIED FOR SYMMETRIC SHARED SECRET
+// This function will now compute a shared secret between two APP-SPECIFIC keys.
+// myAppSkBytes: The current user's app-specific private key (sessionKWallet).
+// theirAppPkEdBytes: The target user's app-specific public key (fetched from server).
+async function generateSymmetricSharedSecret(myAppSkBytes, theirAppPkEdBytes) {
+  console.log("generateSymmetricSharedSecret: myAppSkBytes (hex, first 8B):", bytesToHex(myAppSkBytes.slice(0,8)));
+  console.log("generateSymmetricSharedSecret: theirAppPkEdBytes (hex, first 8B):", bytesToHex(theirAppPkEdBytes.slice(0,8)));
   
-  // Convert Ed25519 public key (edPubTargetBytes) to X25519 public key
-  const xPubT = edwardsToMontgomeryPub(edPubTargetBytes); // Using directly imported function
-
-  console.log("performECDH: xPrivS (scalar, hex, first 8B):", bytesToHex(xPrivS.slice(0,8)));
-  console.log("performECDH: xPubT (X25519 pubkey, hex, first 8B):", bytesToHex(xPubT.slice(0,8)));
-
-  // x25519.getSharedSecret is the correct function from the x25519 object obtained from import { ed25519, x25519 ... }
-  const sharedSecret = await x25519.getSharedSecret(xPrivS, xPubT); 
+  // Convert Ed25519 private key (myAppSkBytes) to X25519 private key (scalar)
+  const myAppX25519Sk = edwardsToMontgomeryPriv(myAppSkBytes);
   
-  console.log("performECDH: sharedSecret (hex, first 8B):", bytesToHex(sharedSecret.slice(0,8)));
+  // Convert Ed25519 public key (theirAppPkEdBytes) to X25519 public key
+  const theirAppX25519Pk = edwardsToMontgomeryPub(theirAppPkEdBytes);
+
+  console.log("generateSymmetricSharedSecret: myAppX25519Sk (scalar, hex, first 8B):", bytesToHex(myAppX25519Sk.slice(0,8)));
+  console.log("generateSymmetricSharedSecret: theirAppX25519Pk (X25519 pubkey, hex, first 8B):", bytesToHex(theirAppX25519Pk.slice(0,8)));
+
+  const sharedSecret = await x25519.getSharedSecret(myAppX25519Sk, theirAppX25519Pk); 
+  
+  console.log("generateSymmetricSharedSecret: sharedSecret (hex, first 8B):", bytesToHex(sharedSecret.slice(0,8)));
   if (sharedSecret.length !== 32) {
-    console.error(`performECDH: sharedSecret length is ${sharedSecret.length}, expected 32.`);
-    throw new Error("ECDH shared secret is not 32 bytes.");
+    console.error(`generateSymmetricSharedSecret: sharedSecret length is ${sharedSecret.length}, expected 32.`);
+    throw new Error("Symmetric ECDH shared secret is not 32 bytes.");
   }
   return sharedSecret;
 }
 
-// TODO: PRD 4.2: Symmetric key & tag
+// TODO: PRD 4.2: Symmetric key & tag - MODIFIED FOR SYMMETRIC DERIVATION
 // K = SHA256(sharedSecret || "pair")
 // tag = SHA256("tag" || K_AB)
-async function deriveSymmetricKeyAndTag(sharedSecret) {
-  const pairSuffix = new TextEncoder().encode("pair");
-  const K_AB = sha256(concatBytes(sharedSecret, pairSuffix));
-
-  const tagPrefix = new TextEncoder().encode("tag");
-  const tag = sha256(concatBytes(tagPrefix, K_AB));
+// This function will now derive keys from the SYMMETRIC shared secret.
+async function deriveSymmetricKeysFromSharedSecret(symmetricSharedSecret) {
+  console.log("deriveSymmetricKeysFromSharedSecret: symmetricSharedSecret (hex, first 8B):", bytesToHex(symmetricSharedSecret.slice(0,8)));
   
-  console.log("deriveSymmetricKeyAndTag: K_AB (hex, first 8B):", bytesToHex(K_AB.slice(0,8)));
-  console.log("deriveSymmetricKeyAndTag: tag (hex, first 8B):", bytesToHex(tag.slice(0,8)));
+  // Use distinct, versioned suffixes for key and tag to avoid collisions if logic changes
+  const encryptionKeySuffix = utf8ToBytes("mutual_match_v3_key");
+  const K_common = sha256(concatBytes(symmetricSharedSecret, encryptionKeySuffix));
 
-  if (K_AB.length !== 32) throw new Error("Symmetric key K_AB is not 32 bytes.");
-  if (tag.length !== 32) throw new Error("Tag is not 32 bytes.");
+  const tagSuffix = utf8ToBytes("mutual_match_v3_tag");
+  // To ensure tag symmetry regardless of who initiates:
+  // Sort the two app public keys involved (lexicographically by hex string) and include them in tag derivation.
+  // This makes the tag independent of "my app PK" vs "their app PK" order.
+  // However, the shared secret itself IS symmetric if derived correctly (ECDH(sk_A, pk_B) == ECDH(sk_B, pk_A)).
+  // So, just using the shared secret + suffix for the tag should be sufficient for symmetry.
+  const tag_common = sha256(concatBytes(symmetricSharedSecret, tagSuffix));
   
-  return { K_AB, tag };
+  console.log("deriveSymmetricKeysFromSharedSecret: K_common (hex, first 8B):", bytesToHex(K_common.slice(0,8)));
+  console.log("deriveSymmetricKeysFromSharedSecret: tag_common (hex, first 8B):", bytesToHex(tag_common.slice(0,8)));
+
+  if (K_common.length !== 32) throw new Error("Symmetric encryption key K_common is not 32 bytes.");
+  if (tag_common.length !== 32) throw new Error("Symmetric tag_common is not 32 bytes.");
+  
+  return { symmetricEncryptionKey: K_common, symmetricTag: tag_common };
 }
 
 // TODO: PRD 4.2: Encrypt payload
 // XChaCha20-Poly1305; nonce=24 B. Payload = two FIDs + optional note
-async function encryptPayload(K_AB, myFid, targetFid, note = "") {
+// K_common is the symmetric encryption key
+async function encryptPayload(K_common, myFid, targetFid, note = "") {
   const myFidBytes = new Uint8Array(new Uint32Array([myFid]).buffer); 
   const targetFidBytes = new Uint8Array(new Uint32Array([targetFid]).buffer); 
   const noteBytes = new TextEncoder().encode(note);
@@ -762,7 +795,7 @@ async function encryptPayload(K_AB, myFid, targetFid, note = "") {
 
   const payload = concatBytes(myFidBytes, targetFidBytes, noteBytes); // noteBytes will be empty
   const nonce = randomBytes(24);
-  const cipher = xchacha20poly1305(K_AB, nonce);
+  const cipher = xchacha20poly1305(K_common, nonce); // Use K_common
   const encryptedPayload = cipher.encrypt(payload);
   const combinedCiphertext = concatBytes(nonce, encryptedPayload);
 
@@ -770,7 +803,7 @@ async function encryptPayload(K_AB, myFid, targetFid, note = "") {
   console.log("encryptPayload: targetFidBytes (hex):", bytesToHex(targetFidBytes));
   // console.log("encryptPayload: noteBytes (hex):", bytesToHex(noteBytes)); // Note is empty
   console.log("encryptPayload: payload (FIDs only, hex):", bytesToHex(payload));
-  console.log("encryptPayload: K_AB (hex, first 8B):", bytesToHex(K_AB.slice(0,8)));
+  console.log("encryptPayload: K_common (hex, first 8B):", bytesToHex(K_common.slice(0,8)));
   console.log("encryptPayload: nonce (hex):", bytesToHex(nonce));
   console.log("encryptPayload: encryptedPayload (incl. Poly1305 tag, hex):", bytesToHex(encryptedPayload));
   console.log("encryptPayload: combinedCiphertext (nonce + encrypted, hex):", bytesToHex(combinedCiphertext));
@@ -802,9 +835,12 @@ async function encryptPayload(K_AB, myFid, targetFid, note = "") {
 // PRD 4.2: Partial Tx build
 // Fee-payer blank; instruction = submit_crush(cipher)
 // Serialize + manual ed25519 sig with sk'
-async function buildPartialTransaction(skPrime, pkPrime, tag, cipherForChain, relayerB58PublicKey) {
+// skPrime, pkPrime: from directional deriveStealthKey (for signing the TX)
+// symmetricTag: from deriveSymmetricKeysFromSharedSecret (for PDA derivation)
+// cipherForChain: encrypted payload using K_common
+async function buildPartialTransaction(skPrime, pkPrime, symmetricTag, cipherForChain, relayerB58PublicKey) {
     console.log("buildPartialTransaction: pkPrime (signer, bs58):", bs58.encode(pkPrime));
-    console.log("buildPartialTransaction: tag (for PDA, hex):", bytesToHex(tag));
+    console.log("buildPartialTransaction: symmetricTag (for PDA, hex):", bytesToHex(symmetricTag));
     console.log("buildPartialTransaction: cipherForChain (hex):", bytesToHex(cipherForChain.slice(0,16)) + "...");
     console.log("buildPartialTransaction: Relayer PubKey for feePayer:", relayerB58PublicKey);
 
@@ -815,10 +851,10 @@ async function buildPartialTransaction(skPrime, pkPrime, tag, cipherForChain, re
     const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
     console.log(`  buildPartialTransaction: Fresh blockhash: ${blockhash}, LastValidBlockHeight: ${lastValidBlockHeight}`);
 
-    // 1. Derive the PDA for the crush account
+    // 1. Derive the PDA for the crush account using the SYMMETRIC tag
     const pdaSeeds = [
         Buffer.from("crush"), 
-        tag                     
+        Buffer.from(symmetricTag) // Use symmetricTag here                    
     ];
     const [crushPda, crushPdaBump] = PublicKey.findProgramAddressSync(
         pdaSeeds.map(seed => seed instanceof Uint8Array ? seed : Buffer.from(seed)), 
@@ -843,13 +879,13 @@ async function buildPartialTransaction(skPrime, pkPrime, tag, cipherForChain, re
     const sighash = sha256(`global:${instructionName}`).slice(0, 8);
     // Instruction arguments are tag and cipher, matching the Rust function
     // submit_crush(ctx: Context<SubmitCrush>, _tag: [u8; 32], cipher: [u8;48])
-    // The _tag argument to the instruction itself:
-    const tagArgBuffer = Buffer.from(tag);
+    // The _tag argument to the instruction itself should be the symmetricTag
+    const tagArgBuffer = Buffer.from(symmetricTag); // Use symmetricTag here
     const cipherArgBuffer = Buffer.from(cipherForChain);
     const instructionData = Buffer.concat([Buffer.from(sighash), tagArgBuffer, cipherArgBuffer]);
 
     console.log(`  Instruction data sighash (hex): ${bytesToHex(sighash)}`);
-    console.log(`  Instruction data tag arg (hex): ${bytesToHex(tagArgBuffer)}`);
+    console.log(`  Instruction data symmetricTag arg (hex): ${bytesToHex(tagArgBuffer)}`);
     console.log(`  Instruction data cipher arg (hex): ${bytesToHex(cipherArgBuffer.slice(0,8))}...`);
 
 
@@ -934,44 +970,96 @@ async function decryptIndex(encryptedBase64, kIndex) {
     }
 }
 
-async function updateUserIndexOnApi(updatedIndexArray) {
+// New helper function to fetch the decrypted user index from the server
+async function getDecryptedUserIndexFromServer() {
     if (!sessionKIndex || !sessionPublicKey) {
-        console.error("kIndex or sessionPublicKey not available for updating index.");
-        updateStatusMessage("Login session error, cannot update crush list.", true);
-        return false; // Indicate failure
+        console.warn("Cannot load user index: kIndex or publicKey not available.");
+        return []; // Return empty array if session not ready
     }
-    updateStatusMessage("Syncing your updated crush list with server...");
+    try {
+        const response = await fetch(`${API_ROOT}/api/user/${sessionPublicKey}`); // Uses main session public key
+        if (response.ok) {
+            const data = await response.json();
+            if (data.encryptedIndex) {
+                return await decryptIndex(data.encryptedIndex, sessionKIndex);
+            }
+        } else if (response.status === 404) {
+            console.log("No index found for user (404 from server). New user or empty index.");
+        } else {
+            const errorData = await response.json().catch(() => ({}));
+            console.error("Error fetching user index:", response.status, errorData);
+            // Fallthrough to return empty array on error
+        }
+    } catch (error) {
+        console.error("Network or parsing error fetching user index:", error);
+        // Fallthrough to return empty array on error
+    }
+    return []; // Default to empty array if no index or error
+}
+
+// Modified function to update index AND app public key
+async function updateUserIndexAndAppKeyOnApi(indexArrayToSave, appPublicKeyHexToSend) {
+    if (!sessionKIndex || !sessionPublicKey) {
+        console.error("kIndex or sessionPublicKey not available for updating user data.");
+        updateStatusMessage("Login session error, cannot sync data.", true);
+        return false;
+    }
+    updateStatusMessage("Syncing your data with server...");
 
     try {
-        console.log("Encrypting updated index for server...");
-        const newEncryptedIndex = await encryptIndex(updatedIndexArray, sessionKIndex);
+        let encryptedIndexToSend = null;
+        if (indexArrayToSave) { // Only encrypt if there's an index to save
+            console.log("Encrypting index for server...");
+            encryptedIndexToSend = await encryptIndex(indexArrayToSave, sessionKIndex);
+        }
 
-        console.log(`PUTting updated index for ${sessionPublicKey}...`);
+        const payload = {};
+        if (encryptedIndexToSend !== null) {
+            payload.encryptedIndex = encryptedIndexToSend;
+        }
+        if (appPublicKeyHexToSend !== null) { // Allow sending just app key, or just index, or both
+            payload.appPublicKeyHex = appPublicKeyHexToSend;
+        }
+
+        if (Object.keys(payload).length === 0) {
+            console.log("No data to update on server (neither index nor app public key provided).");
+            return true; // Nothing to do, so consider it a success.
+        }
+
+        console.log(`PUTting updated data for ${sessionPublicKey}...`, payload);
         const putResponse = await fetch(`${API_ROOT}/api/user/${sessionPublicKey}`, {
             method: 'PUT',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({ encryptedIndex: newEncryptedIndex }),
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
         });
 
         if (!putResponse.ok) {
             const errorData = await putResponse.json().catch(() => ({}));
-            console.error("Error updating user index on server:", putResponse.status, errorData);
-            throw new Error(`Failed to update user index on server: ${errorData.error || putResponse.statusText}`);
+            console.error("Error updating user data on server:", putResponse.status, errorData);
+            throw new Error(`Failed to update user data: ${errorData.error || putResponse.statusText}`);
         }
 
         const putResult = await putResponse.json();
-        console.log("Successfully updated user index on server:", putResult);
-        updateStatusMessage("Your secret crush list synced with server!");
-        displayUserIndex(updatedIndexArray); // Display the list we just successfully saved
-        return true; // Indicate success
+        console.log("Successfully updated user data on server:", putResult);
+        updateStatusMessage("Your data synced with server!");
+        
+        // If an index was part of the update, display it
+        if (indexArrayToSave) {
+            displayUserIndex(indexArrayToSave);
+        }
+        return true;
 
     } catch (error) {
-        console.error("Error in updateUserIndexOnApi:", error);
-        updateStatusMessage(`Failed to sync crush list: ${error.message}`, true);
-        return false; // Indicate failure
+        console.error("Error in updateUserIndexAndAppKeyOnApi:", error);
+        updateStatusMessage(`Failed to sync data: ${error.message}`, true);
+        return false;
     }
+}
+
+// Keep old updateUserIndexOnApi for calls that ONLY update the index (like after a crush status change)
+// but it should now call the new combined function, passing null for appPublicKeyHex
+async function updateUserIndexOnApi(updatedIndexArray) {
+    return await updateUserIndexAndAppKeyOnApi(updatedIndexArray, null); // Pass null for appPublicKeyHex
 }
 
 async function loadAndDisplayUserIndex(displayStaleOnError = false) {
@@ -984,9 +1072,10 @@ async function loadAndDisplayUserIndex(displayStaleOnError = false) {
     console.log(`Attempting to load index for wallet ${sessionPublicKey}...`);
 
     let localDecryptedIndex = [];
+    let userAppKeyFromServer = null; // To store our own app key if fetched
 
     try {
-        const response = await fetch(`${API_ROOT}/api/user/${sessionPublicKey}`);
+        const response = await fetch(`${API_ROOT}/api/user/${sessionPublicKey}`); // Fetches {encryptedIndex, appPublicKeyHex}
         if (response.ok) {
             const data = await response.json();
             if (data.encryptedIndex) {
@@ -997,13 +1086,17 @@ async function loadAndDisplayUserIndex(displayStaleOnError = false) {
                 console.log("No encrypted index found on server for this user.");
                 updateStatusMessage("No crushes found on server. Ready to send one!");
             }
+            if (data.appPublicKeyHex) { // Store our own app public key if server provides it
+                sessionAppPublicKeyHex = data.appPublicKeyHex; // Update global session var
+                userAppKeyFromServer = data.appPublicKeyHex;
+                console.log("Own app public key loaded from server:", userAppKeyFromServer);
+            } else if (!sessionAppPublicKeyHex) { // If not set globally and not from server
+                 console.warn("Own app public key not found on server and not set locally. Mutual match decryption might fail for new crushes until app key is synced.");
+            }
         } else if (response.status === 404) {
-             console.log("No index found for user (404 from server).");
-             updateStatusMessage("No crushes found yet. Send your first!");
+            console.log("No user data found on server before adding new crush. Will create new index.");
         } else {
-            const errorData = await response.json().catch(() => ({}));
-            console.error("Error fetching user index:", response.status, errorData);
-            throw new Error(`API error fetching index: ${errorData.error || response.statusText}`);
+            console.warn("Error fetching user index before adding new crush, proceeding with empty list.");
         }
     } catch (error) {
         console.error("Failed to load or decrypt user index:", error);
@@ -1019,6 +1112,10 @@ async function loadAndDisplayUserIndex(displayStaleOnError = false) {
     console.log("--- Full Decrypted User Index (before on-chain checks) ---");
     localDecryptedIndex.forEach((entry, idx) => {
         console.log(`Entry ${idx}:`, JSON.stringify(entry, null, 2));
+        // Ensure entry has a valid symmetricTag and symmetricKeyHex for checks
+        if (!entry.symmetricTag || !entry.symmetricKeyHex) {
+            console.warn(`Entry ${idx} is missing symmetricTag or symmetricKeyHex. FID: ${entry.targetFid}. This entry might be from an old version.`);
+        }
     });
     console.log("--- End Full Decrypted User Index ---");
 
@@ -1029,26 +1126,31 @@ async function loadAndDisplayUserIndex(displayStaleOnError = false) {
     for (let i = 0; i < localDecryptedIndex.length; i++) {
         const entry = localDecryptedIndex[i];
         if (entry.status === "pending") {
-            console.log(`Checking status for pending crush with tag: ${entry.tag}`);
+            // CRITICAL: Use entry.symmetricTag for PDA derivation
+            if (!entry.symmetricTag) {
+                console.warn(`Skipping check for entry to FID ${entry.targetFid} because symmetricTag is missing (old entry format?).`);
+                continue;
+            }
+            console.log(`Checking status for pending crush with SYMMETRIC tag: ${entry.symmetricTag}`);
             try {
-                const tagBytes = hexToBytes(entry.tag);
-                const pdaSeeds = [Buffer.from("crush"), Buffer.from(tagBytes)];
+                const symmetricTagBytes = hexToBytes(entry.symmetricTag);
+                const pdaSeeds = [Buffer.from("crush"), Buffer.from(symmetricTagBytes)];
                 const [pdaPublicKey, _] = PublicKey.findProgramAddressSync(pdaSeeds, CRUSH_PROGRAM_ID);
                 
-                console.log(`  Fetching PDA: ${pdaPublicKey.toBase58()}`);
+                console.log(`  Fetching PDA (derived from symmetric tag): ${pdaPublicKey.toBase58()}`);
                 const accountInfo = await connection.getAccountInfo(pdaPublicKey);
 
                 if (accountInfo && accountInfo.data) {
                     // Skip 8-byte discriminator for Anchor accounts
                     const pdaData = CRUSH_PDA_LAYOUT.decode(accountInfo.data.slice(8));
-                    console.log(`  PDA data for ${entry.tag}: filled=${pdaData.filled}, bump=${pdaData.bump}`);
+                    console.log(`  PDA data for ${entry.symmetricTag}: filled=${pdaData.filled}, bump=${pdaData.bump}`);
 
                     if (pdaData.filled === 2) {
                         // Defer loud "MUTUAL MATCH FOUND" log until after successful decryption
                         // localDecryptedIndex[i].status = "mutual"; // Set status later if decryption successful or with specific error status
 
-                        if (entry.K_AB_hex) {
-                            const K_AB_bytes = hexToBytes(entry.K_AB_hex);
+                        if (entry.symmetricKeyHex) { // Use symmetricKeyHex
+                            const K_common_bytes = hexToBytes(entry.symmetricKeyHex);
                             
                             const pdaCipher1_onchain_b64 = Buffer.from(pdaData.cipher1).toString('base64');
                             const pdaCipher2_onchain_b64 = Buffer.from(pdaData.cipher2).toString('base64');
@@ -1061,9 +1163,9 @@ async function loadAndDisplayUserIndex(displayStaleOnError = false) {
                                 otherCipherBytes_raw = pdaData.cipher1;
                                 console.log(`  User's cipher (${entry.cipherMine.substring(0,8)}...) matches PDA.cipher2. Other party's is PDA.cipher1.`);
                             } else {
-                                console.warn(`  User's cipher (${entry.cipherMine.substring(0,8)}...) does not match PDA.cipher1 (${pdaCipher1_onchain_b64.substring(0,8)}...) or PDA.cipher2 (${pdaCipher2_onchain_b64.substring(0,8)}...). Cannot determine other party's cipher for tag ${entry.tag}.`);
+                                console.warn(`  User's cipher (${entry.cipherMine.substring(0,8)}...) does not match PDA.cipher1 (${pdaCipher1_onchain_b64.substring(0,8)}...) or PDA.cipher2 (${pdaCipher2_onchain_b64.substring(0,8)}...). This implies an issue with how 'cipherMine' was stored or compared, or the PDA content is unexpected for tag ${entry.symmetricTag}.`);
                                 otherCipherBytes_raw = null;
-                                localDecryptedIndex[i].status = "mutual_decryption_key_mismatch"; // Special status
+                                localDecryptedIndex[i].status = "mutual_decryption_key_mismatch"; // Or "mutual_cipher_mismatch"
                                 localDecryptedIndex[i].revealedInfo = "Mutual (Cipher Mismatch)";
                                 anIndexWasUpdated = true; 
                             }
@@ -1075,10 +1177,10 @@ async function loadAndDisplayUserIndex(displayStaleOnError = false) {
                                 const encryptedDataWithAuthTag = otherCipherForDecryption.slice(24);
                                 
                                 try {
-                                    const cryptoInstance = xchacha20poly1305(K_AB_bytes, nonce);
+                                    const cryptoInstance = xchacha20poly1305(K_common_bytes, nonce); // Use K_common_bytes
                                     const decryptedPayload = cryptoInstance.decrypt(encryptedDataWithAuthTag);
                                     
-                                    console.log(`  MUTUAL MATCH FOUND & DECRYPTED for tag: ${entry.tag}!`);
+                                    console.log(`  MUTUAL MATCH FOUND & DECRYPTED for symmetric tag: ${entry.symmetricTag}!`);
                                     localDecryptedIndex[i].status = "mutual"; // Set status to full mutual
                                     anIndexWasUpdated = true;
 
@@ -1094,36 +1196,36 @@ async function loadAndDisplayUserIndex(displayStaleOnError = false) {
                                         localDecryptedIndex[i].revealedInfo = "Mutual (Payload Format Error)";
                                     }
                                 } catch (decryptionError) {
-                                    console.error(`  Failed to decrypt other party's cipher for tag ${entry.tag}:`, decryptionError);
+                                    console.error(`  Failed to decrypt other party's cipher for symmetric tag ${entry.symmetricTag}:`, decryptionError);
                                     localDecryptedIndex[i].status = "mutual_decryption_failed"; // Special status
                                     localDecryptedIndex[i].revealedInfo = "Mutual (Decryption Error)";
                                     anIndexWasUpdated = true; 
                                 }
                             } else if (otherCipherBytes_raw === null && localDecryptedIndex[i].status !== "mutual_decryption_key_mismatch") {
                                 // This case should ideally not be hit if the above logic correctly sets status on mismatch
-                                console.warn(`  Could not identify or process other party's cipher for tag ${entry.tag} (otherCipherBytes_raw is null/invalid and not a key mismatch).`);
+                                console.warn(`  Could not identify or process other party's cipher for tag ${entry.symmetricTag} (otherCipherBytes_raw is null/invalid and not a key mismatch).`);
                                 localDecryptedIndex[i].status = "mutual_cipher_unavailable";
                                 localDecryptedIndex[i].revealedInfo = "Mutual (Cipher Unavailable)";
                                 anIndexWasUpdated = true;
                             }
                         } else {
-                            console.warn(`  K_AB_hex missing for tag ${entry.tag}, cannot decrypt mutual payload.`);
+                            console.warn(`  symmetricKeyHex missing for tag ${entry.symmetricTag}, cannot decrypt mutual payload.`);
                             localDecryptedIndex[i].status = "mutual_key_missing"; // Special status
                             localDecryptedIndex[i].revealedInfo = "Mutual (Key Missing)";
                             anIndexWasUpdated = true; 
                         }
 
-                        const itemElement = document.querySelector(`[data-tag='${entry.tag}']`);
+                        const itemElement = document.querySelector(`[data-tag='${entry.symmetricTag}']`); // Use symmetricTag for querySelector
                         if(itemElement) itemElement.style.backgroundColor = 'lightgreen'; 
 
                     } else {
-                        console.log(`  PDA for tag ${entry.tag} is not filled (filled=${pdaData.filled}).`);
+                        console.log(`  PDA for symmetric tag ${entry.symmetricTag} is not filled (filled=${pdaData.filled}).`);
                     }
                 } else {
-                    console.log(`  No account data found for PDA of tag: ${entry.tag}. It might not be initialized yet.`);
+                    console.log(`  No account data found for PDA of symmetric tag: ${entry.symmetricTag}. It might not be initialized yet.`);
                 }
             } catch (pdaError) {
-                console.error(`Error checking PDA for tag ${entry.tag}:`, pdaError);
+                console.error(`Error checking PDA for symmetric tag ${entry.symmetricTag}:`, pdaError);
             }
         }
     }
@@ -1169,7 +1271,7 @@ function displayUserIndex(indexArray) {
 
             sortedArray.forEach(entry => {
                 const item = document.createElement('li');
-                item.setAttribute('data-tag', entry.tag); 
+                item.setAttribute('data-tag', entry.symmetricTag || entry.tag);  // Prefer symmetricTag, fallback to old tag
                 item.style.border = "1px solid #eee";
                 item.style.padding = "10px";
                 item.style.marginBottom = "8px";
@@ -1178,7 +1280,7 @@ function displayUserIndex(indexArray) {
                     item.style.backgroundColor = '#e6ffe6'; 
                 }
                 
-                const tagHexSnippet = entry.tag ? entry.tag.substring(0,16) : 'N/A';
+                const tagHexSnippet = entry.symmetricTag ? entry.symmetricTag.substring(0,16) : (entry.tag ? entry.tag.substring(0,16) : 'N/A');
                 item.innerHTML = `
                     <strong>Target FID:</strong> ${entry.targetFid || 'N/A'} <br>
                     <strong>Target Username:</strong> @${entry.targetUsername || 'N/A'} <br>
@@ -1201,8 +1303,8 @@ async function handleSendCrush() {
         updateStatusMessage("No target user with a Solana address selected!", true);
         return;
     }
-    if (!sessionKWallet || !sessionKIndex) { 
-        updateStatusMessage("kWallet or kIndex not available. Please connect and sign first.", true);
+    if (!sessionKWallet || !sessionKIndex || !sessionAppPublicKeyHex) { 
+        updateStatusMessage("User session keys (kWallet, kIndex, or AppPublicKeyHex) not available. Please connect and sign first.", true);
         return;
     }
     // Ensure relayer public key is available
@@ -1233,34 +1335,83 @@ async function handleSendCrush() {
         return;
     }
 
-    const edPubTarget = selectedTargetUser.primary_sol_address;
-    let edPubTargetBytes;
+    const edPubTargetMainSolKeyString = selectedTargetUser.primary_sol_address;
+    let edPubTargetMainSolKeyBytes;
     try {
-        edPubTargetBytes = bs58.decode(edPubTarget);
-        if (edPubTargetBytes.length !== 32) {
-            throw new Error(`Invalid public key length: ${edPubTargetBytes.length}. Expected 32.`);
+        edPubTargetMainSolKeyBytes = bs58.decode(edPubTargetMainSolKeyString);
+        if (edPubTargetMainSolKeyBytes.length !== 32) {
+            throw new Error(`Invalid main target public key length: ${edPubTargetMainSolKeyBytes.length}. Expected 32.`);
         }
     } catch(e) {
-        console.error("Invalid target Solana address (edPubTarget):", edPubTarget, e);
-        updateStatusMessage("The target user\'s Solana address appears invalid.", true);
+        console.error("Invalid target user's main Solana address:", edPubTargetMainSolKeyString, e);
+        updateStatusMessage("The target user's main Solana address appears invalid.", true);
         return;
     }
+    
+    // --- New: Fetch target user's APP-SPECIFIC public key ---
+    let targetUserAppPublicKeyHex;
+    let targetUserAppPublicKeyBytes;
+    try {
+        updateStatusMessage(`Fetching app key for @${selectedTargetUser.username}...`);
+        // Assume selectedTargetUser has their primary_sol_address which is their main wallet address
+        // The API endpoint for app-pubkey should be keyed by their main wallet address.
+        const appKeyResponse = await fetch(`${API_ROOT}/api/user/${selectedTargetUser.primary_sol_address}/app-pubkey`);
+        if (!appKeyResponse.ok) {
+            if (appKeyResponse.status === 404) {
+                 updateStatusMessage(`@${selectedTargetUser.username} hasn't used MutualMatch yet. They need to sign in once.`, true);
+            } else {
+                const errData = await appKeyResponse.json().catch(() => ({}));
+                updateStatusMessage(`Error fetching app key for @${selectedTargetUser.username}: ${errData.error || appKeyResponse.statusText}`, true);
+            }
+            return; 
+        }
+        const appKeyData = await appKeyResponse.json();
+        targetUserAppPublicKeyHex = appKeyData.appPublicKeyHex;
+        if (!targetUserAppPublicKeyHex) {
+             updateStatusMessage(`App key not found for @${selectedTargetUser.username}, even though API responded OK. They might need to use the app.`, true);
+             return;
+        }
+        targetUserAppPublicKeyBytes = hexToBytes(targetUserAppPublicKeyHex);
+        if (targetUserAppPublicKeyBytes.length !== 32) {
+            throw new Error("Fetched target app public key is not 32 bytes.");
+        }
+        console.log(`Successfully fetched app public key for @${selectedTargetUser.username}: ${targetUserAppPublicKeyHex.substring(0,8)}...`);
+    } catch (fetchAppKeyError) {
+        console.error(`Error fetching or processing app public key for ${selectedTargetUser.primary_sol_address} (@${selectedTargetUser.username}):`, fetchAppKeyError);
+        updateStatusMessage(`Could not get app key for @${selectedTargetUser.username}. ${fetchAppKeyError.message}`, true);
+        return;
+    }
+    // --- End Fetch target user's APP-SPECIFIC public key ---
 
     const searchResultsDiv = document.getElementById('searchResults');
     if(searchResultsDiv) searchResultsDiv.innerHTML = "<p>Processing your secret crush... Generating keys...</p>";
     else updateStatusMessage("Processing your secret crush... Generating keys...");
     
     try {
-        updateStatusMessage("Deriving stealth key...");
-        const { skPrime, pkPrime } = await deriveStealthKey(sessionKWallet, edPubTargetBytes);
-        updateStatusMessage("Performing ECDH for shared secret...");
-        const sharedSecret = await performECDH(skPrime, edPubTargetBytes);
-        updateStatusMessage("Deriving symmetric key and tag...");
-        const { K_AB, tag } = await deriveSymmetricKeyAndTag(sharedSecret);
+        // 1. Derive DIRECTIONAL stealth key (skPrime, pkPrime) for SIGNING the transaction
+        // This uses our kWallet and the TARGET's MAIN Solana public key.
+        updateStatusMessage("Deriving transaction signing key...");
+        const { skPrime, pkPrime } = await deriveStealthKey(sessionKWallet, edPubTargetMainSolKeyBytes);
+
+        // 2. Generate SYMMETRIC shared secret using MY app private key (sessionKWallet) and TARGET's APP public key
+        updateStatusMessage("Generating symmetric shared secret...");
+        const symmetricSharedSecret = await generateSymmetricSharedSecret(sessionKWallet, targetUserAppPublicKeyBytes);
+        
+        // 3. Derive SYMMETRIC encryption key (K_common) and SYMMETRIC tag (tag_common) from the shared secret
+        updateStatusMessage("Deriving symmetric encryption key and tag...");
+        const { symmetricEncryptionKey, symmetricTag } = await deriveSymmetricKeysFromSharedSecret(symmetricSharedSecret);
+
+        // 4. Encrypt payload using K_common (symmetricEncryptionKey)
         updateStatusMessage("Encrypting payload...");
-        const cipherForChain = await encryptPayload(K_AB, myFid, selectedTargetUser.fid, "");
+        const cipherForChain = await encryptPayload(symmetricEncryptionKey, myFid, selectedTargetUser.fid, "");
+        
+        // 5. Build partial transaction using:
+        //    - skPrime, pkPrime (for signing the TX)
+        //    - symmetricTag (for PDA derivation and as instruction argument)
+        //    - cipherForChain
         updateStatusMessage("Building partial transaction...");
-        const base64Tx = await buildPartialTransaction(skPrime, pkPrime, tag, cipherForChain, relayerPublicKeyString);
+        const base64Tx = await buildPartialTransaction(skPrime, pkPrime, symmetricTag, cipherForChain, relayerPublicKeyString);
+        
         updateStatusMessage("Sending transaction to relay...");
         const relayResponse = await fetch(`${API_ROOT}/api/relay`, {
             method: 'POST',
@@ -1359,7 +1510,9 @@ async function handleSendCrush() {
                     if (getData.encryptedIndex) {
                         currentIndexArray = await decryptIndex(getData.encryptedIndex, sessionKIndex);
                     }
-                } else if (getResponse.status !== 404) { 
+                } else if (getResponse.status === 404) { 
+                     console.log("No user data found on server before adding new crush. Will create new index.");
+                } else {
                      console.warn("Error fetching user index before adding new crush, proceeding with empty list.");
                 }
             } catch (fetchErr) {
@@ -1367,22 +1520,25 @@ async function handleSendCrush() {
             }
     
             const newCrushEntry = {
-                tag: bytesToHex(tag),
+                symmetricTag: bytesToHex(symmetricTag),          // Changed from 'tag'
                 cipherMine: Buffer.from(cipherForChain).toString('base64'), 
                 status: confirmationStatus, 
                 ts: Date.now(),
                 targetFid: selectedTargetUser.fid,
                 targetUsername: selectedTargetUser.username,
-                K_AB_hex: bytesToHex(K_AB),
+                symmetricKeyHex: bytesToHex(symmetricEncryptionKey), // Changed from K_AB_hex and stores K_common
                 txSignature: finalTxSignature, 
-                confirmationError: confirmationErrorDetail 
+                confirmationError: confirmationErrorDetail,
+                // Include target's app public key for potential future reference/debugging, if needed
+                targetUserAppPublicKeyHex: targetUserAppPublicKeyHex 
             };
     
-            const existingEntryIndex = currentIndexArray.findIndex(entry => entry.tag === newCrushEntry.tag);
+            const existingEntryIndex = currentIndexArray.findIndex(entry => entry.symmetricTag === newCrushEntry.symmetricTag);
             if (existingEntryIndex > -1) currentIndexArray[existingEntryIndex] = newCrushEntry;
             else currentIndexArray.push(newCrushEntry);
             
-            const updateSuccess = await updateUserIndexOnApi(currentIndexArray);
+            // Use the combined function to update index (and ensure app key is still there or updated if changed)
+            const updateSuccess = await updateUserIndexAndAppKeyOnApi(currentIndexArray, sessionAppPublicKeyHex);
     
             if(searchResultsDiv) {
                 let finalUiColor = 'green';
