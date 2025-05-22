@@ -487,10 +487,10 @@ function initializeApp() {
         appDiv.innerHTML = `
             <div id="statusMessage"><p>Ready.</p></div>
             <div id="content">
-                <h3>Fully encrypted and private onchain crushes.</h3>
-                <p>Find out if your Farcaster crush is mutual, discreetly.</p>
+                <h3>Private, secret, fully encrypted onchain crushes.</h3>
+                <p>You tell the Solana chain (securely!) who you like. They do the same. If you both match, you get alerted.</p>
                 <p>Click below to get started by connecting your wallet and signing a message to generate your app-specific keys.</p>
-                <button id="getStartedBtn">Get Started & Authenticate</button>
+                <button id="getStartedBtn">Login with Solana</button>
             </div>
         `;
 
