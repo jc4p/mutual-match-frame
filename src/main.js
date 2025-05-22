@@ -623,6 +623,8 @@ async function handleGetStartedClick() {
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
+    initializeApp(); // Call initializeApp after DOM is loaded
+
     const statusMessageDiv = document.getElementById('statusMessage');
     const contentDiv = document.getElementById('content');
     const getStartedButton = document.getElementById('getStartedBtn'); // Fetch button after DOM is ready
