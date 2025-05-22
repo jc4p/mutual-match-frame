@@ -10,11 +10,26 @@
 
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
+import {
+    Connection,
+    Keypair,
+    Transaction,
+    VersionedTransaction, // For handling transactions that might be versioned
+    sendAndConfirmTransaction, // Simpler for relay, but consider sendRawTransaction for more control
+    PublicKey, // Added PublicKey for PRD auth requirement
+    // verify // Removed as it's not a direct export and was unused
+} from '@solana/web3.js';
+import { sha256 } from '@noble/hashes/sha2'; // For PRD auth requirement
+import bs58 from 'bs58';
+import { Buffer } from 'buffer'; // Ensure Buffer is available for bs58 and Transaction.from
 
-// Define the shape of the environment variables (for TypeScript, if used later)
-// For JS, this serves as a mental note of what `env` should contain.
+// Define the shape of the environment variables
 // interface Env {
 //   NEYNAR_API_KEY: string;
+//   ALCHEMY_SOLANA_RPC_URL: string;
+//   RELAYER_KEY: string;
+//   CRUSH_PROGRAM_ID: string; // As per PRD, for validation
+//   USER_INDEX_KV: KVNamespace;
 // }
 
 const app = new Hono();
@@ -96,7 +111,7 @@ app.post('/api/solana-rpc', async (c) => {
 	}
 
 	try {
-		console.log(`Proxying RPC request to: ${ALCHEMY_SOLANA_RPC_URL}`/*, JSON.stringify(requestBody)*/); // Avoid logging potentially large bodies unless debugging
+		// console.log(`Proxying RPC request to: ${ALCHEMY_SOLANA_RPC_URL}`/*, JSON.stringify(requestBody)*/); // Avoid logging potentially large bodies unless debugging
 
 		const alchemyResponse = await fetch(ALCHEMY_SOLANA_RPC_URL, {
 			method: 'POST',
@@ -121,7 +136,7 @@ app.post('/api/solana-rpc', async (c) => {
 		// Add other important headers from alchemyResponse if necessary, e.g., cache-control, etc.
 
 		// Log status for debugging
-		console.log(`Alchemy response status: ${alchemyResponse.status}`);
+		// console.log(`Alchemy response status: ${alchemyResponse.status}`);
 
 		return new Response(alchemyResponseBody, {
 			status: alchemyResponse.status,
@@ -132,6 +147,379 @@ app.post('/api/solana-rpc', async (c) => {
 		console.error('Error proxying Solana RPC request:', error);
 		return c.json({ error: 'Failed to proxy RPC request', details: error.message }, 500);
 	}
+});
+
+// New endpoint to provide relayer's public key
+app.get('/api/config', (c) => {
+    const { RELAYER_KEY } = c.env;
+    if (!RELAYER_KEY) {
+        console.error('Relay config: RELAYER_KEY not configured.');
+        return c.json({ error: 'Relayer not configured' }, 500);
+    }
+    try {
+        const decodedRelayerSeed = bs58.decode(RELAYER_KEY);
+        const relayerKeypair = Keypair.fromSeed(decodedRelayerSeed);
+        return c.json({ relayerPublicKey: relayerKeypair.publicKey.toBase58() });
+    } catch (e) {
+        console.error('Relay config: Error deriving relayer public key:', e.message);
+        return c.json({ error: 'Error configuring relayer public key.' }, 500);
+    }
+});
+
+// PRD 5.2: /relay endpoint
+app.post('/api/relay', async (c) => {
+    const { RELAYER_KEY, ALCHEMY_SOLANA_RPC_URL, CRUSH_PROGRAM_ID } = c.env;
+
+    if (!RELAYER_KEY || !ALCHEMY_SOLANA_RPC_URL || !CRUSH_PROGRAM_ID) {
+        console.error('Missing required environment variables for /relay endpoint');
+        return c.json({ error: 'Relay service not configured properly.' }, 500);
+    }
+
+    try {
+        const { tx: base64TransactionString } = await c.req.json();
+        if (!base64TransactionString || typeof base64TransactionString !== 'string') {
+            return c.json({ error: 'Invalid or missing transaction string in request body.' }, 400);
+        }
+
+        // console.log('Relay: Received base64 transaction string for new relay logic.');
+
+        const transactionBuffer = Buffer.from(base64TransactionString, 'base64');
+        let receivedTransaction;
+        let isReceivedVersioned = false;
+
+        // Deserialize (assuming legacy transaction as per new frontend design)
+        try {
+            if ((transactionBuffer[0] & 0x80) !== 0) {
+                 console.warn('Relay: Received transaction appears versioned, but legacy format is expected for this flow.');
+                 // Attempt to deserialize as versioned, but this path might need more specific handling
+                 receivedTransaction = VersionedTransaction.deserialize(transactionBuffer);
+                 isReceivedVersioned = true;
+            } else {
+                receivedTransaction = Transaction.from(transactionBuffer);
+            }
+            // console.log('Relay: Successfully deserialized received transaction.');
+        } catch (deserializeError) {
+            // console.error('Relay: Failed to deserialize received transaction:', deserializeError);
+            return c.json({ error: 'Failed to deserialize transaction.', details: deserializeError.message }, 400);
+        }
+
+        if (isReceivedVersioned) {
+            // This simplified relay logic is primarily for legacy transactions where feePayer is set by client.
+            // console.error('Relay: Received a VersionedTransaction. This relay path is optimized for legacy transactions with client-set relayer feePayer.');
+            return c.json({ error: 'Versioned transactions need a different relay handling for fee substitution.' }, 400);
+        }
+
+        // --- Start: New Relay Logic for Legacy Transactions ---
+        // console.log('Relay: Applying new relay logic for legacy transaction.');
+
+        const relayerKeypair = Keypair.fromSeed(bs58.decode(RELAYER_KEY));
+
+        // 1. Verify the transaction's feePayer is the relayer
+        if (!receivedTransaction.feePayer || !receivedTransaction.feePayer.equals(relayerKeypair.publicKey)) {
+            console.error(`Relay: Received transaction feePayer (${receivedTransaction.feePayer ? receivedTransaction.feePayer.toBase58() : 'null'}) does not match relayer public key (${relayerKeypair.publicKey.toBase58()}).`);
+            return c.json({ error: 'Transaction feePayer mismatch. Client must set feePayer to relayer.' }, 400);
+        }
+        // console.log('Relay: Transaction feePayer matches relayer public key.');
+
+        // 2. Program ID and Instruction Count Checks (using the received transaction directly)
+        if (!receivedTransaction.instructions || receivedTransaction.instructions.length !== 1) {
+            return c.json({ error: 'Transaction must contain exactly one instruction.' }, 400);
+        }
+        if (!receivedTransaction.instructions[0].programId.equals(new PublicKey(CRUSH_PROGRAM_ID))) {
+            return c.json({ error: 'Instruction programId does not match CRUSH_PROGRAM_ID.' }, 400);
+        }
+        // console.log('Relay: Instruction programId and count checks passed.');
+        
+        // 3. (Crucial) Verify pkPrime's signature on the received transaction
+        // The transaction message includes relayer as feePayer. pkPrime must have signed this specific message.
+        const messageBytes = receivedTransaction.serializeMessage(); // Message with relayer as feePayer
+
+        // Identify pkPrime's public key and the relayer's public key from the instruction's signers.
+        // The instruction for submit_crush expects two signers:
+        // 1. user_signer (pkPrime)
+        // 2. relayer (which is also the transaction feePayer)
+        let pkPrimePublicKey;
+        let instructionRelayerPublicKey;
+
+        const instructionAccountMetas = receivedTransaction.instructions[0].keys;
+        const instructionSignerMetas = instructionAccountMetas.filter(k => k.isSigner);
+
+        if (instructionSignerMetas.length !== 2) {
+             console.error(`Relay: Expected exactly two signers in the instruction's accounts. Found ${instructionSignerMetas.length}.`);
+             return c.json({ error: 'Instruction signer configuration error: Incorrect number of signers in instruction accounts.'}, 400);
+        }
+
+        // Iterate through the signers in the instruction to identify pkPrime and the relayer
+        // pkPrime is the signer that is NOT the overall transaction feePayer (relayerKeypair.publicKey)
+        // The other signer in the instruction MUST be the relayerKeypair.publicKey
+        let foundPkPrime = false;
+        let foundInstructionRelayer = false;
+
+        for (const signerMeta of instructionSignerMetas) {
+            if (signerMeta.pubkey.equals(relayerKeypair.publicKey)) {
+                instructionRelayerPublicKey = signerMeta.pubkey;
+                foundInstructionRelayer = true;
+            } else {
+                // This must be pkPrime
+                if (pkPrimePublicKey) { // Should not find a second non-relayer signer
+                    console.error('Relay: Found multiple potential pkPrime signers in the instruction.');
+                    return c.json({ error: 'Instruction signer configuration error: Ambiguous pkPrime.' }, 400);
+                }
+                pkPrimePublicKey = signerMeta.pubkey;
+                foundPkPrime = true;
+            }
+        }
+
+        if (!foundPkPrime) {
+            console.error('Relay: pkPrime (user_signer) not found as a signer in the instruction accounts.');
+            return c.json({ error: 'Instruction signer configuration error: pkPrime missing from instruction signers.' }, 400);
+        }
+        if (!foundInstructionRelayer) {
+            console.error('Relay: Relayer not found as a signer in the instruction accounts, but was expected.');
+            // This case should ideally be caught if feePayer is relayer and instruction has 2 signers, one of which isn't relayer.
+            // Adding for robustness.
+            return c.json({ error: 'Instruction signer configuration error: Relayer missing from instruction signers.' }, 400);
+        }
+        
+        // console.log(`Relay: Identified pkPrimePublicKey: ${pkPrimePublicKey.toBase58()} and instructionRelayerPublicKey: ${instructionRelayerPublicKey.toBase58()}`);
+
+        // Find pkPrime's signature on the overall transaction
+        const pkPrimeSignatureEntry = receivedTransaction.signatures.find(s => s.publicKey.equals(pkPrimePublicKey));
+        let pkPrimeSignature;
+
+        if (!pkPrimeSignatureEntry || !pkPrimeSignatureEntry.signature) {
+            console.error(`Relay: Signature for pkPrime (${pkPrimePublicKey.toBase58()}) not found on received transaction.`);
+            return c.json({ error: 'User signature not found on transaction.' }, 400);
+        }
+        pkPrimeSignature = pkPrimeSignatureEntry.signature; // This is a Buffer
+
+        // Verify pkPrime's signature
+        // Note: @noble/ed25519 verify function expects Uint8Array for signature and message.
+        // PublicKey.toBytes() gives Uint8Array. pkPrimeSignature is already Buffer/Uint8Array.
+        // We need the raw public key bytes for noble's ed25519.verify
+        const { ed25519 } = await import('@noble/curves/ed25519');
+        if (!ed25519.verify(pkPrimeSignature, messageBytes, pkPrimePublicKey.toBytes())) {
+           console.error("Relay: pkPrime's signature verification failed for the received transaction message (relayer as feePayer).");
+        //    console.log("pkPrime public key for sig verify:", pkPrimePublicKey.toBase58());
+           // console.log("pkPrime signature for sig verify (b64):", Buffer.from(pkPrimeSignature).toString('base64'));
+           // console.log("Message bytes for sig verify (hex):", Buffer.from(messageBytes).toString('hex'));
+           return c.json({ error: "Invalid user signature on transaction." }, 400);
+        }
+        // console.log("Relay: pkPrime's signature on received transaction (with relayer as feePayer) VERIFIED.");
+
+        // 4. Relayer adds its signature (as feePayer)
+        // The transaction already has relayer as feePayer and pkPrime's signature.
+        // Relayer's signature slot should be null or require signing.
+        // console.log('Relay: Relayer signing the transaction (as feePayer)...');
+        receivedTransaction.partialSign(relayerKeypair); 
+        // partialSign is appropriate as pkPrime's signature is already there.
+        // It will fill the signature slot for relayerKeypair.publicKey.
+        
+        // console.log('Relay: Signatures after relayer signs:', JSON.stringify(receivedTransaction.signatures.map(sig => ({ 
+        //     publicKey: sig.publicKey.toBase58(), 
+        //     signature: sig.signature ? Buffer.from(sig.signature).toString('base64') : null
+        // })), null, 2));
+
+        // 5. Serialize the fully signed transaction for sending
+        // Default `serialize()` options: requireAllSignatures: true, verifySignatures: true
+        // This will internally verify all signatures again.
+        let finalTxBuffer;
+        try {
+            // console.log('Relay: Serializing final transaction (will verify all signatures)...');
+            finalTxBuffer = receivedTransaction.serialize();
+        } catch (serializeError) {
+            // console.error('Relay: Error serializing final transaction:', serializeError);
+            // Log signatures again if serialization fails
+            if (receivedTransaction.signatures) {
+                console.log('Relay: Signatures at time of serialization failure:', JSON.stringify(receivedTransaction.signatures.map(sig => ({ 
+                    publicKey: sig.publicKey.toBase58(), 
+                    signature: sig.signature ? Buffer.from(sig.signature).toString('base64') : null
+                })), null, 2));
+            }
+            return c.json({ error: 'Failed to serialize final transaction.', details: serializeError.message }, 500);
+        }
+        // console.log('Relay: Final transaction serialized successfully.');
+        // --- End: New Relay Logic ---
+        
+        const connection = new Connection(ALCHEMY_SOLANA_RPC_URL, 'confirmed');
+        // console.log('Relay: Sending final transaction to Solana network...');
+        let signature;
+        try {
+            // Send the fully signed and verified (by serialize()) transaction buffer
+            signature = await connection.sendRawTransaction(finalTxBuffer, { skipPreflight: false });
+        } catch (sendError) {
+            console.error('Relay: sendRawTransaction failed. Full error object:', JSON.stringify(sendError, null, 2));
+            let errorDetails = sendError.message;
+            let simulationLogs = null;
+
+            // Attempt to extract logs if they are in a non-standard place or nested
+            if (sendError.transactionLogs && Array.isArray(sendError.transactionLogs)) {
+                simulationLogs = sendError.transactionLogs;
+            } else if (typeof sendError.message === 'string' && sendError.message.includes('Log messages')) {
+                // Sometimes logs are embedded in the message string
+                simulationLogs = sendError.message.split('\n');
+            }
+
+            if (simulationLogs) {
+                console.error('Relay: Extracted Simulation logs:', simulationLogs);
+                return c.json({ 
+                    error: 'Transaction simulation failed on RPC node.', 
+                    details: errorDetails,
+                    simulationLogs: simulationLogs 
+                }, 500);
+            } else {
+                return c.json({ 
+                    error: 'Transaction failed to send.', 
+                    details: errorDetails 
+                }, 500);
+            }
+        }
+        // console.log(`Relay: Transaction sent. Signature: ${signature}`);
+
+        // 8. Return the signature immediately after sending
+        return c.json({ signature });
+
+    } catch (error) {
+        console.error('Error in /relay endpoint:', error.message, error.stack);
+        return c.json({ error: 'Failed to relay transaction.', details: error.message }, 500);
+    }
+});
+
+// PRD 5.2: /user/<wallet> GET endpoint
+app.get('/api/user/:wallet', async (c) => {
+    const { USER_INDEX_KV } = c.env;
+    if (!USER_INDEX_KV) {
+        console.error('USER_INDEX_KV not bound in worker environment');
+        return c.json({ error: 'User index service not configured.' }, 500);
+    }
+
+    const walletAddress = c.req.param('wallet');
+    if (!walletAddress) {
+        return c.json({ error: 'Wallet address parameter is required.' }, 400);
+    }
+
+    try {
+        console.log(`GET /api/user/${walletAddress}: Fetching index.`);
+        const encryptedIndex = await USER_INDEX_KV.get(walletAddress);
+
+        if (encryptedIndex === null) {
+            console.log(`GET /api/user/${walletAddress}: No index found.`);
+            // Return an empty string or a specific structure if preferred by client for "not found"
+            return c.json({ encryptedIndex: null }); 
+        }
+        console.log(`GET /api/user/${walletAddress}: Found index (length ${encryptedIndex.length}).`);
+        return c.json({ encryptedIndex });
+
+    } catch (error) {
+        console.error(`Error getting user index for ${walletAddress}:`, error);
+        return c.json({ error: 'Failed to retrieve user index.', details: error.message }, 500);
+    }
+});
+
+// PRD 5.2: /user/<wallet> PUT endpoint
+app.put('/api/user/:wallet', async (c) => {
+    const { USER_INDEX_KV } = c.env;
+    if (!USER_INDEX_KV) {
+        console.error('USER_INDEX_KV not bound in worker environment');
+        return c.json({ error: 'User index service not configured.' }, 500);
+    }
+
+    const walletAddress = c.req.param('wallet');
+    if (!walletAddress) {
+        return c.json({ error: 'Wallet address parameter is required.' }, 400);
+    }
+
+    let requestBody;
+    try {
+        requestBody = await c.req.json();
+    } catch (e) {
+        return c.json({ error: 'Invalid JSON request body.' }, 400);
+    }
+
+    const { encryptedIndex } = requestBody;
+    if (typeof encryptedIndex !== 'string') {
+        return c.json({ error: 'encryptedIndex (string) is required in request body.' }, 400);
+    }
+
+    try {
+        console.log(`PUT /api/user/${walletAddress}: Storing index (length ${encryptedIndex.length}).`);
+        await USER_INDEX_KV.put(walletAddress, encryptedIndex);
+        console.log(`PUT /api/user/${walletAddress}: Index stored successfully.`);
+        return c.json({ success: true, message: 'User index updated.' });
+
+    } catch (error) {
+        console.error(`Error putting user index for ${walletAddress}:`, error);
+        return c.json({ error: 'Failed to update user index.', details: error.message }, 500);
+    }
+});
+
+// PRD 5.2: /health endpoint
+app.get('/api/health', (c) => {
+    return c.json({ status: 'OK', timestamp: new Date().toISOString() });
+});
+
+// New endpoint for the client to poll transaction status
+app.get('/api/transaction-status', async (c) => {
+    const { ALCHEMY_SOLANA_RPC_URL } = c.env;
+    if (!ALCHEMY_SOLANA_RPC_URL) {
+        console.error('ALCHEMY_SOLANA_RPC_URL not configured for transaction-status check.');
+        return c.json({ error: 'Service not configured' }, 500);
+    }
+
+    const signature = c.req.query('signature');
+    if (!signature) {
+        return c.json({ error: 'Missing \'signature\' query parameter' }, 400);
+    }
+
+    try {
+        const connection = new Connection(ALCHEMY_SOLANA_RPC_URL, 'confirmed');
+        console.log(`Polling status for signature: ${signature}`);
+        
+        // getSignatureStatuses takes an array of signatures
+        const result = await connection.getSignatureStatus(signature, {
+            searchTransactionHistory: true, // Important for finding older transactions
+        });
+
+        console.log(`Signature status for ${signature}:`, JSON.stringify(result, null, 2));
+
+        if (!result) {
+            // Signature not found, could be still processing or never landed
+            return c.json({ signature, status: 'notFound' });
+        }
+
+        let simplifiedStatus = 'pending'; // Default assumption
+        if (result.value) {
+            if (result.value.err) {
+                simplifiedStatus = 'failed';
+                return c.json({ 
+                    signature, 
+                    status: simplifiedStatus, 
+                    error: result.value.err, 
+                    confirmationStatus: result.value.confirmationStatus 
+                });
+            }
+            // Possible confirmation statuses: 'processed', 'confirmed', 'finalized'
+            if (result.value.confirmationStatus === 'finalized') {
+                simplifiedStatus = 'finalized';
+            } else if (result.value.confirmationStatus === 'confirmed') {
+                simplifiedStatus = 'confirmed';
+            } else if (result.value.confirmationStatus === 'processed') {
+                simplifiedStatus = 'processed';
+            }
+            return c.json({ 
+                signature, 
+                status: simplifiedStatus, 
+                confirmationStatus: result.value.confirmationStatus 
+            });
+        } else {
+             // Fallback if result.value is null but result itself is not (should be caught by !result earlier)
+            return c.json({ signature, status: 'notFoundOrPending' });
+        }
+
+    } catch (error) {
+        console.error(`Error fetching transaction status for ${signature}:`, error);
+        return c.json({ error: 'Failed to fetch transaction status', details: error.message }, 500);
+    }
 });
 
 export default app;

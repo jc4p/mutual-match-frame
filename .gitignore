@@ -27,3 +27,11 @@ api/.dev.vars
 api/.vscode
 api/.wrangler
 api/node_modules
+
+onchain-program/.anchor
+onchain-program/.DS_Store
+onchain-program/target
+onchain-program/**/*.rs.bk
+onchain-program/node_modules
+onchain-program/test-ledger
+onchain-program/.yarn
