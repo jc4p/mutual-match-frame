@@ -495,7 +495,7 @@ function initializeApp() {
             <div id="content">
                 <h3>Private, secret, fully encrypted onchain crushes.</h3>
                 <p>You tell the Solana chain (securely!) who you like. They do the same. If there's a match you'll be notified.</p>
-                <p>Get started by connecting your wallet and signing a message to generate your app-specific keys.</p>
+                <p>Get started by connecting your wallet and generating app-specific keys.</p>
                 <button id="getStartedBtn">Login with Solana</button>
             </div>
         `;
