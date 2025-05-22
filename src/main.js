@@ -188,9 +188,14 @@ function initDebugConsole() {
 // Store kWallet, kIndex, publicKey, and selected target user in memory for the session
 let sessionKWallet = null;
 let sessionKIndex = null; // Will be derived from kWallet
-let sessionPublicKey = null;
+let sessionPublicKey = null; // This will be set after successful signing
 let selectedTargetUser = null; // To store { fid, username, display_name, pfp_url, primary_sol_address }
 let relayerPublicKeyString = null; // Variable to store relayer's public key
+
+// --- New global variables for provider and connected public key ---
+let solanaProviderInstance = null;
+let userPublicKeyString = null; // Stores public key from wallet connection, before signing
+// --- End new global variables ---
 
 // Debounce utility
 function debounce(func, delay) {
@@ -318,51 +323,25 @@ async function fetchRelayerPublicKey() {
 }
 
 // Placeholder for wallet interaction and signing
-async function connectAndSign() {
-    console.log("--- connectAndSign called ---");
+// THIS FUNCTION WILL BE REPLACED/REFACTORED
+// async function connectAndSign() { ... }
 
+// --- New function to handle signing and subsequent setup ---
+async function performSignatureAndSetup(provider, publicKeyStrToSignWith) {
+    console.log("--- performSignatureAndSetup called ---");
+    const getStartedButton = document.getElementById('getStartedBtn'); // Ensure button is accessible
     const contentDiv = document.getElementById('content');
-    updateStatusMessage("Attempting to get Solana Provider...");
 
-    let solanaProvider = null;
     try {
-        solanaProvider = await frame.sdk.experimental.getSolanaProvider();
-
-        if (!solanaProvider) {
-            console.error("await frame.sdk.experimental.getSolanaProvider() returned null or undefined.");
-            updateStatusMessage('Error: Solana Wallet Provider not available.', true);
-            if(contentDiv) contentDiv.innerHTML = '<p>Please ensure your Farcaster client is set up correctly.</p>';
-            return null;
+        updateStatusMessage(`Signing message with ${publicKeyStrToSignWith.slice(0,4)}...${publicKeyStrToSignWith.slice(-4)}`);
+        if(getStartedButton) {
+            getStartedButton.disabled = true;
+            getStartedButton.textContent = 'Awaiting Signature...';
         }
-        
-        updateStatusMessage("Solana Provider found! Connecting to wallet...");
-
-        let publicKeyString; 
-        try {
-            updateStatusMessage("Awaiting wallet connection approval...");
-            const connectionResponse = await solanaProvider.request({ method: 'connect' });
-            publicKeyString = connectionResponse?.publicKey
-            console.log('publicKeyString:', publicKeyString);
-        } catch (connectError) {
-            console.error("Error connecting to Solana wallet:", connectError);
-            updateStatusMessage('Error connecting to wallet.', true);
-            if(contentDiv) contentDiv.innerHTML = `<p>${connectError.message}. You might need to approve the connection.</p>`;
-            return null;
-        }
-
-        if (!publicKeyString || typeof publicKeyString !== 'string') {
-            console.error("Could not get publicKey as a string from Solana provider. Received:", publicKeyString);
-            updateStatusMessage('Error: Could not get public key string.', true);
-            if(contentDiv) contentDiv.innerHTML = '<p>Wallet might not be connected/approved or provider returned unexpected format.</p>';
-            return null;
-        }
-        
-        console.log("Successfully obtained publicKey string:", publicKeyString);
-        updateStatusMessage(`Wallet connected: ${publicKeyString.slice(0,4)}...${publicKeyString.slice(-4)}. Signing message...`);
 
         const messageString = "This is a message to confirm you are logging into encrypted mutual match using your Warplet!";
-        console.log(`Attempting to sign message: "${messageString}"`);
-        const signedMessageResult = await solanaProvider.signMessage(messageString);
+        console.log(`Attempting to sign message: "${messageString}" with provider:`, provider);
+        const signedMessageResult = await provider.signMessage(messageString);
         console.log("signMessage result:", signedMessageResult);
         
         let signature;
@@ -370,7 +349,6 @@ async function connectAndSign() {
 
         if (signedMessageResult && typeof signatureString === 'string') {
             let decodedSuccessfully = false;
-
             try {
                 const decodedBs58 = bs58.decode(signatureString);
                 if (decodedBs58.length === 64) {
@@ -391,7 +369,6 @@ async function connectAndSign() {
                     for (let i = 0; i < binaryString.length; i++) {
                         bytes[i] = binaryString.charCodeAt(i);
                     }
-
                     if (bytes.length === 64) {
                         signature = bytes;
                         decodedSuccessfully = true;
@@ -407,26 +384,23 @@ async function connectAndSign() {
             if (!decodedSuccessfully) {
                  console.error("Could not decode signature as Base58 or Base64 to a 64-byte array. Original string:", signatureString);
                  updateStatusMessage('Error: Could not decode signature.', true);
-                 if(contentDiv) contentDiv.innerHTML = '<p>The signature format from the wallet was undecodable or incorrect length.</p>';
-                 return null;
+                 throw new Error('Signature decoding failed.');
             }
         } else {
             console.error("Unexpected signature format from signMessage. Expected an object with a string 'signature' property. Received:", signedMessageResult);
             updateStatusMessage('Error: Unexpected signature format.', true);
-            if(contentDiv) contentDiv.innerHTML = '<p>Received an unexpected signature format from the wallet for the message signature.</p>';
-            return null;
+            throw new Error('Unexpected signature format from wallet.');
         }
 
         if (!signature || signature.length === 0) {
              console.error("Signature is null or empty after processing.");
              updateStatusMessage('Error: Signature processing failed.', true);
-             return null;
+             throw new Error('Signature processing resulted in empty signature.');
         }
 
         sessionKWallet = sha256(signature);
-        sessionPublicKey = publicKeyString; 
+        sessionPublicKey = publicKeyStrToSignWith; // Set the session's main public key
 
-        // Derive kIndex PRD 4.2: kIndex = SHA256("HOT" || kWallet)
         const hotPrefix = utf8ToBytes("HOT");
         sessionKIndex = sha256(concatBytes(hotPrefix, sessionKWallet));
 
@@ -434,7 +408,7 @@ async function connectAndSign() {
         console.log('kWallet (hex, first 8 bytes):', bytesToHex(sessionKWallet.slice(0,8)));
         console.log('kIndex (hex, first 8 bytes):', bytesToHex(sessionKIndex.slice(0,8)));
         
-        updateStatusMessage(`Signed in! Wallet: ${publicKeyString.slice(0,4)}...${publicKeyString.slice(-4)}`);
+        updateStatusMessage(`Signed in! Wallet: ${sessionPublicKey.slice(0,4)}...${sessionPublicKey.slice(-4)}`);
         
         if(contentDiv) contentDiv.innerHTML = `
             <p>Submit New Crush:</p>
@@ -446,29 +420,38 @@ async function connectAndSign() {
             debouncedSearchUsers(e.target.value);
         });
         
-        const connectButton = document.getElementById('connectWalletBtn');
-        if(connectButton) connectButton.style.display = 'none';
+        if(getStartedButton) getStartedButton.style.display = 'none'; // Hide after successful sign-in and setup
 
-        // Attempt to load existing index from API after successful login
         await loadAndDisplayUserIndex();
+        await fetchRelayerPublicKey(); // Fetch relayer key after successful sign-in
 
-        // Fetch relayer public key after successful sign-in
-        try {
-            await fetchRelayerPublicKey();
-        } catch (e) {
-            // Error already handled and displayed by fetchRelayerPublicKey
-            return null; // Prevent further app operation if config fails
-        }
-
-        return { kWallet: sessionKWallet, publicKey: sessionPublicKey, kIndex: sessionKIndex }; 
+        return { kWallet: sessionKWallet, publicKey: sessionPublicKey, kIndex: sessionKIndex };
 
     } catch (error) {
-        console.error("Error in connectAndSign process:", error);
-        updateStatusMessage(`Error: ${error.message}.`, true);
-        if(contentDiv) contentDiv.innerHTML = `<p>See debug console for details. Ensure your Farcaster wallet is set up.</p>`;
+        console.error("Error in performSignatureAndSetup process:", error);
+        updateStatusMessage(`Error during sign-in: ${error.message}.`, true);
+        
+        // Reset session state
+        sessionKWallet = null;
+        sessionPublicKey = null;
+        sessionKIndex = null;
+        userPublicKeyString = null; // Clear connected public key as well
+
+        if(contentDiv) contentDiv.innerHTML = `<p>Sign-in process failed. See console for details. <button id="getStartedBtn">Try Again</button></p>`;
+        
+        const newGetStartedButton = document.getElementById('getStartedBtn');
+        if (newGetStartedButton) { // If button was re-added to contentDiv
+            newGetStartedButton.textContent = 'Connect Wallet & Sign In';
+            newGetStartedButton.disabled = false;
+            newGetStartedButton.addEventListener('click', handleGetStartedClick); // Re-attach main handler
+        } else if (getStartedButton) { // If original button is still there (e.g. contentDiv not replaced)
+             getStartedButton.disabled = false;
+             getStartedButton.textContent = 'Connect Wallet & Sign In';
+        }
         return null;
     }
 }
+// --- End new function ---
 
 function initializeApp() {
     if (document.readyState === 'loading') {
@@ -496,25 +479,14 @@ function initializeApp() {
                 <h3>Private, secret, fully encrypted onchain crushes.</h3>
                 <p>You tell the Solana chain (securely!) who you like. They do the same. If there's a match you'll be notified.</p>
                 <p>Get started by connecting your wallet and generating app-specific keys.</p>
-                <button id="getStartedBtn">Login with Solana</button>
+                <button id="getStartedBtn" disabled>Loading SDK...</button>
             </div>
         `;
 
         // Step B: Triggering Wallet Connection
         const getStartedButton = document.getElementById('getStartedBtn');
         if (getStartedButton) {
-            getStartedButton.addEventListener('click', () => {
-                // Optionally hide or disable the button to prevent multiple clicks
-                getStartedButton.disabled = true; 
-                getStartedButton.textContent = 'Loading...';
-                
-                // Clear initial welcome message from content, connectAndSign will populate it
-                const contentDiv = document.getElementById('content');
-                if(contentDiv) {
-                    contentDiv.innerHTML = '<p>Initializing connection...</p>';
-                }
-                connectAndSign();
-            });
+            getStartedButton.addEventListener('click', handleGetStartedClick);
         }
     } else {
         console.error("Could not find #app element in HTML.");
@@ -532,7 +504,7 @@ function populateHowItWorksModal() {
         const contentHtml = `
         <p>Mutual Match allows Farcaster users to discreetly signal interest in someone. If the interest is mutual, both users are notified. Otherwise, your secret is safe!</p>
 
-        <h3>How It Works (Summary)</h3>
+        <h3>How It Works</h3>
         <ul>
             <li>✍️ <strong>Sign In:</strong> You sign a message with your wallet – this keeps your main Farcaster account details separate and generates a special key for this app.</li>
             <li>🤫 <strong>Express a Crush:</strong> You pick someone you follow. The app uses clever cryptography to prepare your 'crush' message.</li>
@@ -595,28 +567,99 @@ function initHowItWorksModal() {
 }
 // --- End How It Works Modal Logic ---
 
-initializeApp();
+async function handleGetStartedClick() {
+    const getStartedButton = document.getElementById('getStartedBtn'); // Ensure we have the button
+
+    if (!solanaProviderInstance) {
+        updateStatusMessage("Solana Provider not initialized. Cannot connect.", true);
+        console.error("handleGetStartedClick: solanaProviderInstance is null.");
+        if(getStartedButton) {
+            getStartedButton.disabled = false; // Allow retry if it was a UI glitch
+            getStartedButton.textContent = 'Provider Error - Retry';
+        }
+        return;
+    }
+
+    if(getStartedButton) {
+        getStartedButton.disabled = true;
+        getStartedButton.textContent = 'Connecting Wallet...';
+    }
+    updateStatusMessage("Awaiting wallet connection approval...");
+
+    try {
+        const connectionResponse = await solanaProviderInstance.request({ method: 'connect' });
+        const pkString = connectionResponse?.publicKey;
+
+        if (!pkString || typeof pkString !== 'string') {
+            console.error("Could not get public key as a string from Solana provider. Received:", pkString);
+            updateStatusMessage('Error: Could not get public key string.', true);
+            throw new Error("Wallet connection did not return a valid public key string.");
+        }
+        
+        userPublicKeyString = pkString; // Store globally upon successful connection
+        console.log("Wallet connected successfully. Public Key:", userPublicKeyString);
+        updateStatusMessage(`Wallet connected: ${userPublicKeyString.slice(0,4)}...${userPublicKeyString.slice(-4)}. Now, proceed to sign message.`);
+
+        // Now call the signing part
+        await performSignatureAndSetup(solanaProviderInstance, userPublicKeyString);
+
+    } catch (connectError) {
+        console.error("Error connecting to Solana wallet:", connectError);
+        updateStatusMessage(`Error connecting wallet: ${connectError.message}. Please try again.`, true);
+        if(getStartedButton) {
+            getStartedButton.disabled = false;
+            getStartedButton.textContent = 'Connect Wallet & Sign In';
+        }
+        userPublicKeyString = null; // Clear on error
+        const contentDiv = document.getElementById('content');
+        if(contentDiv && !document.getElementById('getStartedBtn')) { // If button was removed by performSignatureAndSetup error path
+            contentDiv.innerHTML = `<p>Wallet connection failed. <button id="getStartedBtn">Try Again</button></p>`;
+            const newButton = document.getElementById('getStartedBtn');
+            if (newButton) {
+                newButton.addEventListener('click', handleGetStartedClick);
+            }
+        }
+    }
+}
 
 document.addEventListener('DOMContentLoaded', async () => {
     const statusMessageDiv = document.getElementById('statusMessage');
     const contentDiv = document.getElementById('content');
+    const getStartedButton = document.getElementById('getStartedBtn'); // Fetch button after DOM is ready
     
     try {
         if (statusMessageDiv) statusMessageDiv.innerHTML = "<p>Farcaster SDK: Waiting for actions.ready()...</p>";
         await frame.sdk.actions.ready();
-        if (statusMessageDiv) { // Check if statusMessageDiv is still valid after innerHTML changes
-            const currentStatus = document.getElementById('statusMessage');
-            if (currentStatus) currentStatus.innerHTML = "<p>Farcaster SDK Ready. Click 'Get Started' to begin.</p>";
-        }
-        // No need to update contentDiv here as initializeApp sets the initial welcome screen.
-        // The original message "<p>Please click 'Connect Wallet & Sign' to begin.</p>" is now obsolete.
+        if (statusMessageDiv) statusMessageDiv.innerHTML = "<p>Farcaster SDK Ready. Initializing Solana Provider...</p>";
 
+        solanaProviderInstance = await frame.sdk.experimental.getSolanaProvider();
+
+        if (solanaProviderInstance) {
+            if (statusMessageDiv) statusMessageDiv.innerHTML = "<p>Solana Provider available. Click 'Connect Wallet & Sign In'.</p>";
+            if (getStartedButton) {
+                getStartedButton.disabled = false;
+                getStartedButton.textContent = 'Connect Wallet & Sign In';
+            }
+        } else {
+            console.error("Failed to get Solana Provider from Farcaster SDK.");
+            if (statusMessageDiv) statusMessageDiv.innerHTML = "<p>Error: Solana Wallet Provider not available from SDK.</p>";
+            if (getStartedButton) {
+                getStartedButton.disabled = true;
+                getStartedButton.textContent = 'Solana Provider Error';
+            }
+        }
     } catch (error) {
-        console.error("Error during Farcaster SDK actions.ready():", error);
-        const currentStatus = document.getElementById('statusMessage');
-        const currentContent = document.getElementById('content');
-        if (currentStatus) currentStatus.innerHTML = "<p>Error initializing Farcaster SDK.</p>";
-        if (currentContent) currentContent.innerHTML = "<p>An error occurred with Farcaster SDK. See debug console.</p>";
+        console.error("Error during Farcaster SDK actions.ready() or Solana Provider init:", error);
+        const currentStatus = document.getElementById('statusMessage'); // Re-fetch
+        const currentContent = document.getElementById('content'); // Re-fetch
+        const getStartedButtonOnError = document.getElementById('getStartedBtn'); // Re-fetch
+
+        if (currentStatus) currentStatus.innerHTML = "<p>Error initializing Farcaster SDK or Solana Provider.</p>";
+        if (currentContent) currentContent.innerHTML = "<p>An error occurred. See debug console.</p>";
+        if (getStartedButtonOnError) {
+            getStartedButtonOnError.disabled = true;
+            getStartedButtonOnError.textContent = 'SDK/Provider Init Error';
+        }
     }
 });
 

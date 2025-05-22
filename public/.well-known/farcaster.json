@@ -1,0 +1,18 @@
+{
+  "accountAssociation": {
+    "header": "eyJmaWQiOjk3NzIzMywidHlwZSI6ImN1c3RvZHkiLCJrZXkiOiIweGE2N0JhMDI4MTIzMWVCOUUyZWE0Y0Y5Nzg5NGMwYjBiNUI4MDFDYzYifQ",
+    "payload": "eyJkb21haW4iOiJtdXR1YWwtbWF0Y2gua2FzcmEuY29kZXMifQ",
+    "signature": "MHhhOWU1NmY3MjIzOTY0ODE3Y2Q0NGJmNmM5NGY2OWVjZjRmYzYyMGEyZDBmZGNiZjI4YjY0OGFlOWZhODJkYWQ0NDVkZDVmMGM3ZTEzMTdjYjczM2JmZDFjYTM2ODNhYTdmODM5NWFiODU2ODNkYmRiYjRiYzMxODAyZTVkNjI0ZjFi"
+  },
+  "frame": {
+    "version": "1",
+    "name": "Mutual Match",
+    "iconUrl": "https://cover-art.kasra.codes/mutual_match_square.png",
+    "homeUrl": "https://mutual-match.kasra.codes",
+    "imageUrl": "https://cover-art.kasra.codes/mutual_match_rectangle.png",
+    "buttonTitle": "Spill Your Secrets",
+    "splashImageUrl": "https://cover-art.kasra.codes/mutual_match_square.png",
+    "splashBackgroundColor": "#021B3A"
+  }
+}
+
