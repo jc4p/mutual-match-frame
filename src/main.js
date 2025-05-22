@@ -986,56 +986,73 @@ async function loadAndDisplayUserIndex(displayStaleOnError = false) {
                     console.log(`  PDA data for ${entry.tag}: filled=${pdaData.filled}, bump=${pdaData.bump}`);
 
                     if (pdaData.filled === 2) {
-                        console.log(`  MUTUAL MATCH FOUND for tag: ${entry.tag}!`);
-                        localDecryptedIndex[i].status = "mutual";
-                        anIndexWasUpdated = true;
-                        
-                        // Decrypt the *other* cipher to potentially display a note or confirm FIDs.
+                        // Defer loud "MUTUAL MATCH FOUND" log until after successful decryption
+                        // localDecryptedIndex[i].status = "mutual"; // Set status later if decryption successful or with specific error status
+
                         if (entry.K_AB_hex) {
                             const K_AB_bytes = hexToBytes(entry.K_AB_hex);
-                            const pdaCipher1_b64 = Buffer.from(pdaData.cipher1).toString('base64');
-                            // const pdaCipher2_b64 = Buffer.from(pdaData.cipher2).toString('base64'); // Not needed if only one other
+                            
+                            const pdaCipher1_onchain_b64 = Buffer.from(pdaData.cipher1).toString('base64');
+                            const pdaCipher2_onchain_b64 = Buffer.from(pdaData.cipher2).toString('base64');
+                            let otherCipherBytes_raw;
 
-                            let otherCipherBytes;
-                            if (pdaCipher1_b64 === entry.cipherMine) {
-                                otherCipherBytes = pdaData.cipher2; // User's was cipher1, so other is cipher2
-                                console.log(`  User's cipher was cipher1, other party's is cipher2.`);
+                            if (entry.cipherMine === pdaCipher1_onchain_b64) {
+                                otherCipherBytes_raw = pdaData.cipher2;
+                                console.log(`  User's cipher (${entry.cipherMine.substring(0,8)}...) matches PDA.cipher1. Other party's is PDA.cipher2.`);
+                            } else if (entry.cipherMine === pdaCipher2_onchain_b64) {
+                                otherCipherBytes_raw = pdaData.cipher1;
+                                console.log(`  User's cipher (${entry.cipherMine.substring(0,8)}...) matches PDA.cipher2. Other party's is PDA.cipher1.`);
                             } else {
-                                otherCipherBytes = pdaData.cipher1; // User's was cipher2 (or not found), so other is cipher1
-                                console.log(`  User's cipher was not cipher1 (or was cipher2), other party's is cipher1.`);
+                                console.warn(`  User's cipher (${entry.cipherMine.substring(0,8)}...) does not match PDA.cipher1 (${pdaCipher1_onchain_b64.substring(0,8)}...) or PDA.cipher2 (${pdaCipher2_onchain_b64.substring(0,8)}...). Cannot determine other party's cipher for tag ${entry.tag}.`);
+                                otherCipherBytes_raw = null;
+                                localDecryptedIndex[i].status = "mutual_decryption_key_mismatch"; // Special status
+                                localDecryptedIndex[i].revealedInfo = "Mutual (Cipher Mismatch)";
+                                anIndexWasUpdated = true; 
                             }
 
-                            if (otherCipherBytes && otherCipherBytes.length === 48) {
-                                const nonce = otherCipherBytes.slice(0, 24);
-                                const encryptedDataWithAuthTag = otherCipherBytes.slice(24);
+                            if (otherCipherBytes_raw && otherCipherBytes_raw.length === 48) {
+                                // Ensure Uint8Array type for crypto operations
+                                const otherCipherForDecryption = Uint8Array.from(otherCipherBytes_raw);
+                                const nonce = otherCipherForDecryption.slice(0, 24);
+                                const encryptedDataWithAuthTag = otherCipherForDecryption.slice(24);
+                                
                                 try {
                                     const cryptoInstance = xchacha20poly1305(K_AB_bytes, nonce);
                                     const decryptedPayload = cryptoInstance.decrypt(encryptedDataWithAuthTag);
                                     
-                                    // Payload is myFid (4 bytes) + targetFid (4 bytes)
+                                    console.log(`  MUTUAL MATCH FOUND & DECRYPTED for tag: ${entry.tag}!`);
+                                    localDecryptedIndex[i].status = "mutual"; // Set status to full mutual
+                                    anIndexWasUpdated = true;
+
                                     if (decryptedPayload.length === 8) {
                                         const view = new DataView(decryptedPayload.buffer, decryptedPayload.byteOffset, decryptedPayload.byteLength);
-                                        const theirFidInPayload = view.getUint32(0, true); // Assuming little-endian from original encryption
-                                        const myFidInPayload = view.getUint32(4, true);    // Assuming little-endian
+                                        const theirFidInPayload = view.getUint32(0, true); 
+                                        const myFidInPayload = view.getUint32(4, true);    
                                         
                                         console.log(`  Successfully decrypted other party's payload! Their FID: ${theirFidInPayload}, My FID: ${myFidInPayload}`);
-                                        // Additional confirmation: check if myFidInPayload matches the current user's FID
-                                        // And if theirFidInPayload matches entry.targetFid
-                                        // This confirms integrity and correct key usage.
-                                        localDecryptedIndex[i].revealedInfo = `Mutual with FID ${theirFidInPayload} (you are ${myFidInPayload})`;
+                                        localDecryptedIndex[i].revealedInfo = `Mutual with FID ${theirFidInPayload}`;
                                     } else {
                                         console.warn("  Decrypted payload from other party has unexpected length:", decryptedPayload.length);
+                                        localDecryptedIndex[i].revealedInfo = "Mutual (Payload Format Error)";
                                     }
                                 } catch (decryptionError) {
                                     console.error(`  Failed to decrypt other party's cipher for tag ${entry.tag}:`, decryptionError);
-                                    localDecryptedIndex[i].revealedInfo = "Mutual (decryption issue)";
+                                    localDecryptedIndex[i].status = "mutual_decryption_failed"; // Special status
+                                    localDecryptedIndex[i].revealedInfo = "Mutual (Decryption Error)";
+                                    anIndexWasUpdated = true; 
                                 }
-                            } else {
-                                console.warn(`  Could not identify or process other party's cipher for tag ${entry.tag}.`);
+                            } else if (otherCipherBytes_raw === null && localDecryptedIndex[i].status !== "mutual_decryption_key_mismatch") {
+                                // This case should ideally not be hit if the above logic correctly sets status on mismatch
+                                console.warn(`  Could not identify or process other party's cipher for tag ${entry.tag} (otherCipherBytes_raw is null/invalid and not a key mismatch).`);
+                                localDecryptedIndex[i].status = "mutual_cipher_unavailable";
+                                localDecryptedIndex[i].revealedInfo = "Mutual (Cipher Unavailable)";
+                                anIndexWasUpdated = true;
                             }
                         } else {
                             console.warn(`  K_AB_hex missing for tag ${entry.tag}, cannot decrypt mutual payload.`);
-                            localDecryptedIndex[i].revealedInfo = "Mutual (key missing)";
+                            localDecryptedIndex[i].status = "mutual_key_missing"; // Special status
+                            localDecryptedIndex[i].revealedInfo = "Mutual (Key Missing)";
+                            anIndexWasUpdated = true; 
                         }
 
                         const itemElement = document.querySelector(`[data-tag='${entry.tag}']`);
