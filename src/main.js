@@ -21,7 +21,7 @@ import { Buffer } from 'buffer'; // Import Buffer
 // const API_ROOT = 'https://mutual-match-api.kasra.codes';
 const API_ROOT ='https://11b61a2abc20.ngrok.app';
 const SOLANA_RPC_URL = `${API_ROOT}/api/solana-rpc`; 
-const CRUSH_PROGRAM_ID = new PublicKey('8dscc2LJf8HV3737bGNfjPT7JAkezNvGujdXFwgsYXDV'); // Updated Program ID
+const CRUSH_PROGRAM_ID = new PublicKey('GSAh2GuhF6niNFhwV4Yd2Kbd18m3N7a6ysaseCrQiKy7'); // Updated Program ID
 
 // Alias noble functions to avoid name clashes if any, and for consistency
 const bytesToHex = nobleBytesToHex;
