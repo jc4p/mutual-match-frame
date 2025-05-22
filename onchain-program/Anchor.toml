@@ -6,13 +6,13 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-onchain_program = "GSAh2GuhF6niNFhwV4Yd2Kbd18m3N7a6ysaseCrQiKy7"
+onchain_program = "4uBr7GzwJz1ikA6rZpCbX7hpYxsmBRxbjYwNXFwW8ohD"
 
 [registry]
 url = "https://api.apr.dev"
 
 [programs.mainnet]
-onchain_program = "GSAh2GuhF6niNFhwV4Yd2Kbd18m3N7a6ysaseCrQiKy7"
+onchain_program = "4uBr7GzwJz1ikA6rZpCbX7hpYxsmBRxbjYwNXFwW8ohD"
 
 [provider]
 cluster = "mainnet"
