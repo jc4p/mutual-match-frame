@@ -581,7 +581,7 @@ function initializeApp() {
             <div id="statusMessage"><p>Ready.</p></div>
             <div id="content">
                 <h3>Private, secret, fully encrypted onchain crushes.</h3>
-                <p>Tell the Solana chain (securely!) who you like. If they like you back (and have also used this app once), you'll both be notified!</p>
+                <p>Tell the Solana chain (securely!) who you like. If they like you back you'll both be notified!</p>
                 <p>For a match to work, the person you're interested in must also have signed into this app at least once.</p>
                 <button id="getStartedBtn" disabled>Loading SDK...</button>
             </div>
