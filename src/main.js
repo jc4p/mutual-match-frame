@@ -470,28 +470,124 @@ async function connectAndSign() {
 
 function initializeApp() {
     if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', initDebugConsole);
+        document.addEventListener('DOMContentLoaded', () => {
+            initDebugConsole();
+            initHowItWorksModal(); // Initialize modal controls
+            populateHowItWorksModal(); // Populate modal content
+        });
     } else {
         initDebugConsole();
+        initHowItWorksModal();
+        populateHowItWorksModal();
     }
 
     const appDiv = document.getElementById('app');
     if (appDiv) {
+        // Step A: Initial Welcome Screen
         appDiv.innerHTML = `
-            <div id="statusMessage"><p>App Initialized. Farcaster SDK loading...</p></div>
-            <button id="connectWalletBtn">Connect Wallet & Sign</button>
+            <div id="statusMessage"><p>Ready.</p></div>
             <div id="content">
-                <p>Please wait for Farcaster SDK to be ready, then click the button.</p>
-  </div>
+                <h1>Welcome to Secret Mutual Crush!</h1>
+                <p>Find out if your Farcaster crush is mutual, discreetly.</p>
+                <p>Click below to get started by connecting your wallet and signing a message to generate your app-specific keys.</p>
+                <button id="getStartedBtn">Get Started & Authenticate</button>
+            </div>
         `;
-        const connectButton = document.getElementById('connectWalletBtn');
-        if (connectButton) {
-            connectButton.addEventListener('click', connectAndSign);
+
+        // Step B: Triggering Wallet Connection
+        const getStartedButton = document.getElementById('getStartedBtn');
+        if (getStartedButton) {
+            getStartedButton.addEventListener('click', () => {
+                // Optionally hide or disable the button to prevent multiple clicks
+                getStartedButton.disabled = true; 
+                getStartedButton.textContent = 'Loading...';
+                
+                // Clear initial welcome message from content, connectAndSign will populate it
+                const contentDiv = document.getElementById('content');
+                if(contentDiv) {
+                    contentDiv.innerHTML = '<p>Initializing connection...</p>';
+                }
+                connectAndSign();
+            });
         }
     } else {
         console.error("Could not find #app element in HTML.");
     }
 }
+
+// --- How It Works Modal Logic ---
+function populateHowItWorksModal() {
+    const modalContent = document.getElementById('howItWorksModalContent');
+    if (modalContent) {
+        // Find the existing h2 and insert content after it
+        const h2 = modalContent.querySelector('h2');
+        const closeButton = modalContent.querySelector('#howItWorksCloseBtn');
+        
+        const contentHtml = `
+        <p>Secret Mutual Crush allows Farcaster users to discreetly signal interest in someone. If the interest is mutual, both users are notified. Otherwise, your secret is safe!</p>
+
+        <h3>How It Works (Summary)</h3>
+        <ul>
+            <li>✍️ <strong>Sign In:</strong> You sign a message with your wallet – this keeps your main Farcaster account details separate and generates a special key for this app.</li>
+            <li>🤫 <strong>Express a Crush:</strong> You pick someone you follow. The app uses clever cryptography to prepare your 'crush' message.</li>
+            <li>🔒 <strong>Encryption Magic:</strong> Your choice is encrypted using keys that only you and your potential crush can generate if you <em>both</em> express interest. The server or anyone else can't read it.</li>
+            <li>🔗 <strong>OnChain (but private!):</strong> An encrypted piece of data is sent to the Solana blockchain. This data doesn't reveal who you are or who you crushed on.</li>
+            <li>🎉 <strong>Mutual Match:</strong> If the person you crushed on also crushes on you using this app, the system detects a match! Both of you will be notified. Otherwise, your crush remains a secret.</li>
+        </ul>
+
+        <h3>Security & Privacy</h3>
+        <ul>
+            <li>🛡️ <strong>Stealthy Transactions:</strong> Your actual wallet address isn't directly linked to the onchain crush data. We use 'stealth keys' for this.</li>
+            <li>🔐 <strong>Server Can't Peek:</strong> The list of your crushes stored on our server is encrypted with a key derived from your initial wallet signature. We can't decrypt it.</li>
+            <li>🚫 <strong>Not <em>Technically</em> Zero-Knowledge:</strong> While we use strong encryption and privacy techniques, this system isn't strictly 'zero-knowledge' in the formal cryptographic sense. However, it's designed to be highly private and secure for its purpose.</li>
+        </ul>
+
+        <h3>Benefits</h3>
+        <ul>
+            <li>Discreet way to find mutual connections.</li>
+            <li>Strong encryption protects your choices.</li>
+            <li>Anonymous onchain interactions.</li>
+        </ul>
+        `;
+        
+        // Clear existing content except h2 and close button
+        while(h2.nextSibling && h2.nextSibling !== closeButton && h2.nextSibling.nextSibling !== null) {
+             modalContent.removeChild(h2.nextSibling);
+        }
+        
+        // Insert the new content after the H2
+        h2.insertAdjacentHTML('afterend', contentHtml);
+
+    } else {
+        console.warn("How It Works modal content area not found.");
+    }
+}
+
+function initHowItWorksModal() {
+    const howItWorksBtn = document.getElementById('howItWorksBtn');
+    const howItWorksModalOverlay = document.getElementById('howItWorksModalOverlay');
+    const howItWorksCloseBtn = document.getElementById('howItWorksCloseBtn');
+
+    if (howItWorksBtn && howItWorksModalOverlay && howItWorksCloseBtn) {
+        howItWorksBtn.addEventListener('click', () => {
+            howItWorksModalOverlay.style.display = 'block';
+        });
+
+        howItWorksCloseBtn.addEventListener('click', () => {
+            howItWorksModalOverlay.style.display = 'none';
+        });
+
+        howItWorksModalOverlay.addEventListener('click', (event) => {
+            if (event.target === howItWorksModalOverlay) { // Clicked on overlay itself
+                howItWorksModalOverlay.style.display = 'none';
+            }
+        });
+        console.log("How It Works modal initialized.");
+    } else {
+        console.warn("How It Works modal elements not found. Button or modal functionality will be missing.");
+    }
+}
+// --- End How It Works Modal Logic ---
 
 initializeApp();
 
@@ -502,13 +598,19 @@ document.addEventListener('DOMContentLoaded', async () => {
     try {
         if (statusMessageDiv) statusMessageDiv.innerHTML = "<p>Farcaster SDK: Waiting for actions.ready()...</p>";
         await frame.sdk.actions.ready();
-        if (statusMessageDiv) statusMessageDiv.innerHTML = "<p>Farcaster SDK Ready.</p>";
-        if (contentDiv) contentDiv.innerHTML = "<p>Please click 'Connect Wallet & Sign' to begin.</p>";
+        if (statusMessageDiv) { // Check if statusMessageDiv is still valid after innerHTML changes
+            const currentStatus = document.getElementById('statusMessage');
+            if (currentStatus) currentStatus.innerHTML = "<p>Farcaster SDK Ready. Click 'Get Started' to begin.</p>";
+        }
+        // No need to update contentDiv here as initializeApp sets the initial welcome screen.
+        // The original message "<p>Please click 'Connect Wallet & Sign' to begin.</p>" is now obsolete.
 
     } catch (error) {
         console.error("Error during Farcaster SDK actions.ready():", error);
-        if (statusMessageDiv) statusMessageDiv.innerHTML = "<p>Error initializing Farcaster SDK.</p>";
-        if (contentDiv) contentDiv.innerHTML = "<p>An error occurred with Farcaster SDK. See debug console.</p>";
+        const currentStatus = document.getElementById('statusMessage');
+        const currentContent = document.getElementById('content');
+        if (currentStatus) currentStatus.innerHTML = "<p>Error initializing Farcaster SDK.</p>";
+        if (currentContent) currentContent.innerHTML = "<p>An error occurred with Farcaster SDK. See debug console.</p>";
     }
 });
 
