@@ -22,6 +22,8 @@ const API_ROOT = 'https://mutual-match-api.kasra.codes';
 const SOLANA_RPC_URL = `${API_ROOT}/api/solana-rpc`; 
 const CRUSH_PROGRAM_ID = new PublicKey('4uBr7GzwJz1ikA6rZpCbX7hpYxsmBRxbjYwNXFwW8ohD'); // Updated Program ID
 
+const IS_PRODUCTION = true;
+
 // Alias noble functions to avoid name clashes if any, and for consistency
 const bytesToHex = nobleBytesToHex;
 const hexToBytes = nobleHexToBytes;
@@ -29,7 +31,7 @@ const hexToBytes = nobleHexToBytes;
 console.log("Encrypted Mutual Match App Initializing...");
 
 // --- Debug Console Start ---
-let debugConsoleVisible = false;
+let debugConsoleVisible = false; // Ensure console starts hidden (minimized)
 const originalConsole = {
     log: console.log.bind(console),
     warn: console.warn.bind(console),
@@ -435,7 +437,7 @@ async function connectAndSign() {
         updateStatusMessage(`Signed in! Wallet: ${publicKeyString.slice(0,4)}...${publicKeyString.slice(-4)}`);
         
         if(contentDiv) contentDiv.innerHTML = `
-            <p>Welcome! Search for a user to send a secret crush.</p>
+            <p>Submit New Crush:</p>
             <input type="text" id="userSearchInput" class="user-search-input" placeholder="Search by username...">
             <div id="searchResults" class="search-results-container"></div>
             <div id="userIndexContainerPlaceholder"></div>
@@ -471,12 +473,16 @@ async function connectAndSign() {
 function initializeApp() {
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', () => {
-            initDebugConsole();
+            if (!IS_PRODUCTION) {
+                initDebugConsole();
+            }
             initHowItWorksModal(); // Initialize modal controls
             populateHowItWorksModal(); // Populate modal content
         });
     } else {
-        initDebugConsole();
+        if (!IS_PRODUCTION) {
+            initDebugConsole();
+        }
         initHowItWorksModal();
         populateHowItWorksModal();
     }
@@ -488,8 +494,8 @@ function initializeApp() {
             <div id="statusMessage"><p>Ready.</p></div>
             <div id="content">
                 <h3>Private, secret, fully encrypted onchain crushes.</h3>
-                <p>You tell the Solana chain (securely!) who you like. They do the same. If you both match, you get alerted.</p>
-                <p>Click below to get started by connecting your wallet and signing a message to generate your app-specific keys.</p>
+                <p>You tell the Solana chain (securely!) who you like. They do the same. If there's a match you'll be notified.</p>
+                <p>Get started by connecting your wallet and signing a message to generate your app-specific keys.</p>
                 <button id="getStartedBtn">Login with Solana</button>
             </div>
         `;
