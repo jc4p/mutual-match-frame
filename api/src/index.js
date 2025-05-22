@@ -149,8 +149,25 @@ app.post('/api/solana-rpc', async (c) => {
 	}
 });
 
+// New endpoint to provide relayer's public key
+app.get('/api/config', (c) => {
+    const { RELAYER_KEY } = c.env;
+    if (!RELAYER_KEY) {
+        console.error('Relay config: RELAYER_KEY not configured.');
+        return c.json({ error: 'Relayer not configured' }, 500);
+    }
+    try {
+        const decodedRelayerSeed = bs58.decode(RELAYER_KEY);
+        const relayerKeypair = Keypair.fromSeed(decodedRelayerSeed);
+        return c.json({ relayerPublicKey: relayerKeypair.publicKey.toBase58() });
+    } catch (e) {
+        console.error('Relay config: Error deriving relayer public key:', e.message);
+        return c.json({ error: 'Error configuring relayer public key.' }, 500);
+    }
+});
+
 // PRD 5.2: /relay endpoint
-app.post('/relay', async (c) => {
+app.post('/api/relay', async (c) => {
     const { RELAYER_KEY, ALCHEMY_SOLANA_RPC_URL, CRUSH_PROGRAM_ID } = c.env;
 
     if (!RELAYER_KEY || !ALCHEMY_SOLANA_RPC_URL || !CRUSH_PROGRAM_ID) {
@@ -164,85 +181,184 @@ app.post('/relay', async (c) => {
             return c.json({ error: 'Invalid or missing transaction string in request body.' }, 400);
         }
 
-        console.log('Relay: Received base64 transaction string.');
+        console.log('Relay: Received base64 transaction string for new relay logic.');
 
-        // 1. Deserialize the transaction
         const transactionBuffer = Buffer.from(base64TransactionString, 'base64');
-        // Try to deserialize as VersionedTransaction first, then fallback to legacy Transaction
-        let transaction;
-        let isVersioned = false;
+        let receivedTransaction;
+        let isReceivedVersioned = false;
+
+        // Deserialize (assuming legacy transaction as per new frontend design)
         try {
-            transaction = VersionedTransaction.deserialize(transactionBuffer);
-            isVersioned = true;
-            console.log('Relay: Deserialized as VersionedTransaction.');
-        } catch (e) {
-            try {
-                transaction = Transaction.from(transactionBuffer);
-                console.log('Relay: Deserialized as legacy Transaction.');
-            } catch (deserializeError) {
-                console.error('Relay: Failed to deserialize transaction as Versioned or legacy:', deserializeError);
-                return c.json({ error: 'Failed to deserialize transaction.', details: deserializeError.message }, 400);
+            if ((transactionBuffer[0] & 0x80) !== 0) {
+                 console.warn('Relay: Received transaction appears versioned, but legacy format is expected for this flow.');
+                 // Attempt to deserialize as versioned, but this path might need more specific handling
+                 receivedTransaction = VersionedTransaction.deserialize(transactionBuffer);
+                 isReceivedVersioned = true;
+            } else {
+                receivedTransaction = Transaction.from(transactionBuffer);
             }
+            console.log('Relay: Successfully deserialized received transaction.');
+        } catch (deserializeError) {
+            console.error('Relay: Failed to deserialize received transaction:', deserializeError);
+            return c.json({ error: 'Failed to deserialize transaction.', details: deserializeError.message }, 400);
         }
 
-        // 2. PRD: size & programID check (Basic check for now)
-        if (transaction.instructions.length !== 1) {
-             return c.json({ error: 'Transaction must contain exactly one instruction.' }, 400);
+        if (isReceivedVersioned) {
+            // This simplified relay logic is primarily for legacy transactions where feePayer is set by client.
+            // Handling pre-signed versioned transactions for relayer fee payment is more complex.
+            console.error('Relay: Received a VersionedTransaction. This relay path is optimized for legacy transactions with client-set relayer feePayer.');
+            return c.json({ error: 'Versioned transactions need a different relay handling for fee substitution.' }, 400);
         }
-        if (!transaction.instructions[0].programId.equals(new PublicKey(CRUSH_PROGRAM_ID))) {
+
+        // --- Start: New Relay Logic for Legacy Transactions ---
+        console.log('Relay: Applying new relay logic for legacy transaction.');
+
+        const relayerKeypair = Keypair.fromSeed(bs58.decode(RELAYER_KEY));
+
+        // 1. Verify the transaction's feePayer is the relayer
+        if (!receivedTransaction.feePayer || !receivedTransaction.feePayer.equals(relayerKeypair.publicKey)) {
+            console.error(`Relay: Received transaction feePayer (${receivedTransaction.feePayer ? receivedTransaction.feePayer.toBase58() : 'null'}) does not match relayer public key (${relayerKeypair.publicKey.toBase58()}).`);
+            return c.json({ error: 'Transaction feePayer mismatch. Client must set feePayer to relayer.' }, 400);
+        }
+        console.log('Relay: Transaction feePayer matches relayer public key.');
+
+        // 2. Program ID and Instruction Count Checks (using the received transaction directly)
+        if (!receivedTransaction.instructions || receivedTransaction.instructions.length !== 1) {
+            return c.json({ error: 'Transaction must contain exactly one instruction.' }, 400);
+        }
+        if (!receivedTransaction.instructions[0].programId.equals(new PublicKey(CRUSH_PROGRAM_ID))) {
             return c.json({ error: 'Instruction programId does not match CRUSH_PROGRAM_ID.' }, 400);
         }
-        console.log('Relay: Transaction instruction count and program ID checks passed.');
-
-        // 3. Load relayer keypair
-        const relayerKeypair = Keypair.fromSecretKey(bs58.decode(RELAYER_KEY));
-        console.log(`Relay: Relayer public key: ${relayerKeypair.publicKey.toBase58()}`);
-
-        // 4. Set relayer as fee payer
-        // For VersionedTransaction, message.payerKey is the fee payer.
-        // For legacy Transaction, feePayer property.
-        if (isVersioned) {
-            // Reconstruct if needed, or ensure it was set correctly initially.
-            // For now, assume client sets it to a placeholder and we overwrite.
-            // If the client already set their stealth key as feePayer in the message,
-            // we need to create a new message or modify the existing one if possible.
-            // For simplicity, let's assume we rebuild the message for VersionedTransaction if feePayer needs changing.
-            // However, VersionedTransaction.message.payerKey is not directly writable after construction usually.
-            // The most straightforward way for a relayer is often to take the instructions
-            // and build a new transaction where it is the feePayer from the start.
-            // But for partially signed, we aim to add a signature.
-
-            // If client compiled with THEIR feePayer, and we sign with OURS, it might mismatch.
-            // It's often simpler if the relayer re-signs the whole transaction as the new fee payer.
-            // Let's assume the partially signed tx is mostly for the instruction signer.
-            // We will add our signature. The `sendAndConfirmTransaction` will use our keypair as the payer.
-            transaction.sign([relayerKeypair]); // Sign with relayer. If it's versioned, this adds the signature.
-                                              // The `feePayer` for versioned TX is the first signature by convention if not specified.
-            console.log('Relay: Signed versioned transaction with relayer key.');
-        } else {
-            transaction.feePayer = relayerKeypair.publicKey;
-            // Sign the transaction (partially if only fee payer, or fully if it needs it)
-            // The client already signed with their stealth key.
-            // We need to sign as the feePayer.
-            transaction.partialSign(relayerKeypair); // For legacy transactions
-            console.log('Relay: Partially signed legacy transaction with relayer key as feePayer.');
-        }
+        console.log('Relay: Instruction programId and count checks passed.');
         
-        // 5. Connect to Solana
-        const connection = new Connection(ALCHEMY_SOLANA_RPC_URL, 'confirmed');
+        // 3. (Crucial) Verify pkPrime's signature on the received transaction
+        // The transaction message includes relayer as feePayer. pkPrime must have signed this specific message.
+        const messageBytes = receivedTransaction.serializeMessage(); // Message with relayer as feePayer
 
-        // 6. Send the transaction
-        console.log('Relay: Sending transaction to Solana network...');
-        const signature = await connection.sendRawTransaction(transaction.serialize());
+        // Find pkPrime's public key and signature from the transaction
+        // pkPrime is the one instruction signer that is NOT the relayer (feePayer)
+        let pkPrimePublicKey;
+        let pkPrimeSignature;
+
+        const instructionSigners = receivedTransaction.instructions[0].keys.filter(k => k.isSigner);
+        if (instructionSigners.length !== 1) {
+             console.error('Relay: Expected exactly one signer in the instruction for pkPrime.');
+             // This assumes your instruction has only one other signer apart from potentially the feePayer if it were also a signer.
+             // Adjust if instruction has multiple client-side signers.
+             // For this specific app, pkPrime is the only instruction signer.
+             return c.json({ error: 'Instruction signer configuration error.'}, 400);
+        }
+        pkPrimePublicKey = instructionSigners[0].pubkey;
+
+        const pkPrimeSignatureEntry = receivedTransaction.signatures.find(s => s.publicKey.equals(pkPrimePublicKey));
+
+        if (!pkPrimeSignatureEntry || !pkPrimeSignatureEntry.signature) {
+            console.error(`Relay: Signature for pkPrime (${pkPrimePublicKey.toBase58()}) not found on received transaction.`);
+            return c.json({ error: 'User signature not found on transaction.' }, 400);
+        }
+        pkPrimeSignature = pkPrimeSignatureEntry.signature; // This is a Buffer
+
+        // Verify pkPrime's signature
+        // Note: @noble/ed25519 verify function expects Uint8Array for signature and message.
+        // PublicKey.toBytes() gives Uint8Array. pkPrimeSignature is already Buffer/Uint8Array.
+        // We need the raw public key bytes for noble's ed25519.verify
+        const { ed25519 } = await import('@noble/curves/ed25519'); // Ensure noble ed25519 is available
+        if (!ed25519.verify(pkPrimeSignature, messageBytes, pkPrimePublicKey.toBytes())) {
+           console.error("Relay: pkPrime's signature verification failed for the received transaction message (relayer as feePayer).");
+           console.log("pkPrime public key for sig verify:", pkPrimePublicKey.toBase58());
+           // console.log("pkPrime signature for sig verify (b64):", Buffer.from(pkPrimeSignature).toString('base64'));
+           // console.log("Message bytes for sig verify (hex):", Buffer.from(messageBytes).toString('hex'));
+           return c.json({ error: "Invalid user signature on transaction." }, 400);
+        }
+        console.log("Relay: pkPrime's signature on received transaction (with relayer as feePayer) VERIFIED.");
+
+        // 4. Relayer adds its signature (as feePayer)
+        // The transaction already has relayer as feePayer and pkPrime's signature.
+        // Relayer's signature slot should be null or require signing.
+        console.log('Relay: Relayer signing the transaction (as feePayer)...');
+        receivedTransaction.partialSign(relayerKeypair); 
+        // partialSign is appropriate as pkPrime's signature is already there.
+        // It will fill the signature slot for relayerKeypair.publicKey.
+        
+        console.log('Relay: Signatures after relayer signs:', JSON.stringify(receivedTransaction.signatures.map(sig => ({ 
+            publicKey: sig.publicKey.toBase58(), 
+            signature: sig.signature ? Buffer.from(sig.signature).toString('base64') : null
+        })), null, 2));
+
+        // 5. Serialize the fully signed transaction for sending
+        // Default `serialize()` options: requireAllSignatures: true, verifySignatures: true
+        // This will internally verify all signatures again.
+        let finalTxBuffer;
+        try {
+            console.log('Relay: Serializing final transaction (will verify all signatures)...');
+            finalTxBuffer = receivedTransaction.serialize();
+        } catch (serializeError) {
+            console.error('Relay: Error serializing final transaction:', serializeError);
+            // Log signatures again if serialization fails
+            if (receivedTransaction.signatures) {
+                console.log('Relay: Signatures at time of serialization failure:', JSON.stringify(receivedTransaction.signatures.map(sig => ({ 
+                    publicKey: sig.publicKey.toBase58(), 
+                    signature: sig.signature ? Buffer.from(sig.signature).toString('base64') : null
+                })), null, 2));
+            }
+            return c.json({ error: 'Failed to serialize final transaction.', details: serializeError.message }, 500);
+        }
+        console.log('Relay: Final transaction serialized successfully.');
+        // --- End: New Relay Logic ---
+        
+        const connection = new Connection(ALCHEMY_SOLANA_RPC_URL, 'confirmed');
+        console.log('Relay: Sending final transaction to Solana network...');
+        let signature;
+        try {
+            // Send the fully signed and verified (by serialize()) transaction buffer
+            signature = await connection.sendRawTransaction(finalTxBuffer, { skipPreflight: false });
+        } catch (sendError) {
+            console.error('Relay: sendRawTransaction failed. Full error object:', JSON.stringify(sendError, null, 2));
+            let errorDetails = sendError.message;
+            let simulationLogs = null;
+
+            // Attempt to extract logs if they are in a non-standard place or nested
+            if (sendError.transactionLogs && Array.isArray(sendError.transactionLogs)) {
+                simulationLogs = sendError.transactionLogs;
+            } else if (typeof sendError.message === 'string' && sendError.message.includes('Log messages')) {
+                // Sometimes logs are embedded in the message string
+                simulationLogs = sendError.message.split('\n');
+            }
+
+            if (simulationLogs) {
+                console.error('Relay: Extracted Simulation logs:', simulationLogs);
+                return c.json({ 
+                    error: 'Transaction simulation failed on RPC node.', 
+                    details: errorDetails,
+                    simulationLogs: simulationLogs 
+                }, 500);
+            } else {
+                return c.json({ 
+                    error: 'Transaction failed to send.', 
+                    details: errorDetails 
+                }, 500);
+            }
+        }
         console.log(`Relay: Transaction sent. Signature: ${signature}`);
 
         // 7. Confirm the transaction (optional but good for relay)
-        // Consider longer confirmation times or different strategies for production
-        const confirmation = await connection.confirmTransaction(signature, 'confirmed');
-        console.log('Relay: Transaction confirmation: ', confirmation);
-
-        if (confirmation.value.err) {
-            throw new Error(`Solana transaction failed: ${JSON.stringify(confirmation.value.err)}`);
+        console.log('Relay: Confirming transaction...');
+        try {
+            const confirmation = await connection.confirmTransaction(signature, 'confirmed');
+            console.log('Relay: Transaction confirmation: ', confirmation);
+            if (confirmation.value.err) {
+                throw new Error(`Solana transaction confirmation failed: ${JSON.stringify(confirmation.value.err)}`);
+            }
+        } catch (confirmError) {
+            console.error('Relay: Transaction confirmation failed.', confirmError);
+            // Even if confirmation times out or fails, the tx might have landed. 
+            // For a relayer, often returning the signature is enough once sent.
+            // Depending on UX, might want to inform user about confirmation status uncertainty.
+            return c.json({ 
+                warning: 'Transaction sent but confirmation failed or timed out.', 
+                signature: signature,
+                details: confirmError.message 
+            }, 202); // 202 Accepted, as tx was sent
         }
 
         // 8. Return the signature

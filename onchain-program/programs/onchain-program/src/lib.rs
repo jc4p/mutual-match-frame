@@ -45,14 +45,19 @@ pub struct CrushPda {
 pub struct SubmitCrush<'info> {
     #[account(
         init_if_needed,
-        payer = signer,
+        payer = relayer,
         seeds = [b"crush", tag.as_ref()],
         bump,
         space = 8 + 1 + 1 + 48 + 48 // Discriminator (8) + bump (1) + filled (1) + cipher1 (48) + cipher2 (48) = 106
     )]
     pub crush_pda: Account<'info, CrushPda>,
+
     #[account(mut)]
-    pub signer: Signer<'info>,
+    pub user_signer: Signer<'info>,
+
+    #[account(mut)]
+    pub relayer: Signer<'info>,
+
     pub system_program: Program<'info, System>,
 }
 

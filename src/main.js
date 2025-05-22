@@ -18,7 +18,8 @@ import {
 } from '@solana/web3.js';
 import { Buffer } from 'buffer'; // Import Buffer
 
-const API_ROOT = 'https://mutual-match-api.kasra.codes';
+// const API_ROOT = 'https://mutual-match-api.kasra.codes';
+const API_ROOT ='https://11b61a2abc20.ngrok.app';
 const SOLANA_RPC_URL = `${API_ROOT}/api/solana-rpc`; 
 const CRUSH_PROGRAM_ID = new PublicKey('8dscc2LJf8HV3737bGNfjPT7JAkezNvGujdXFwgsYXDV'); // Updated Program ID
 
@@ -188,6 +189,7 @@ let sessionKWallet = null;
 let sessionKIndex = null; // Will be derived from kWallet
 let sessionPublicKey = null;
 let selectedTargetUser = null; // To store { fid, username, display_name, pfp_url, primary_sol_address }
+let relayerPublicKeyString = null; // Variable to store relayer's public key
 
 // Debounce utility
 function debounce(func, delay) {
@@ -288,6 +290,31 @@ async function searchUsers(query) {
 }
 
 const debouncedSearchUsers = debounce(searchUsers, 300);
+
+// Function to fetch relayer's public key
+async function fetchRelayerPublicKey() {
+    if (relayerPublicKeyString) return relayerPublicKeyString; // Return cached key if available
+
+    console.log("Fetching relayer public key from /api/config...");
+    try {
+        const response = await fetch(`${API_ROOT}/api/config`);
+        if (!response.ok) {
+            const errData = await response.json().catch(() => ({}));
+            throw new Error(`Failed to fetch relayer config: ${errData.error || response.statusText}`);
+        }
+        const configData = await response.json();
+        if (!configData.relayerPublicKey) {
+            throw new Error("Relayer public key not found in config response.");
+        }
+        relayerPublicKeyString = configData.relayerPublicKey;
+        console.log("Relayer public key fetched and cached:", relayerPublicKeyString);
+        return relayerPublicKeyString;
+    } catch (error) {
+        console.error("Error fetching relayer public key:", error);
+        updateStatusMessage("Error fetching relayer configuration. Cannot proceed.", true);
+        throw error; // Re-throw to stop further execution in handleSendCrush
+    }
+}
 
 // Placeholder for wallet interaction and signing
 async function connectAndSign() {
@@ -410,7 +437,7 @@ async function connectAndSign() {
         
         if(contentDiv) contentDiv.innerHTML = `
             <p>Welcome! Search for a user to send a secret crush.</p>
-            <input type="text" id="userSearchInput" class="user-search-input" placeholder="Search Farcaster users by name or FID...">
+            <input type="text" id="userSearchInput" class="user-search-input" placeholder="Search by username...">
             <div id="searchResults" class="search-results-container"></div>
             <div id="userIndexContainerPlaceholder"></div>
         `;
@@ -423,6 +450,14 @@ async function connectAndSign() {
 
         // Attempt to load existing index from API after successful login
         await loadAndDisplayUserIndex();
+
+        // Fetch relayer public key after successful sign-in
+        try {
+            await fetchRelayerPublicKey();
+        } catch (e) {
+            // Error already handled and displayed by fetchRelayerPublicKey
+            return null; // Prevent further app operation if config fails
+        }
 
         return { kWallet: sessionKWallet, publicKey: sessionPublicKey, kIndex: sessionKIndex }; 
 
@@ -615,19 +650,24 @@ async function encryptPayload(K_AB, myFid, targetFid, note = "") {
 // PRD 4.2: Partial Tx build
 // Fee-payer blank; instruction = submit_crush(cipher)
 // Serialize + manual ed25519 sig with sk'
-async function buildPartialTransaction(skPrime, pkPrime, tag, cipherForChain) {
+async function buildPartialTransaction(skPrime, pkPrime, tag, cipherForChain, relayerB58PublicKey) {
     console.log("buildPartialTransaction: pkPrime (signer, bs58):", bs58.encode(pkPrime));
     console.log("buildPartialTransaction: tag (for PDA, hex):", bytesToHex(tag));
     console.log("buildPartialTransaction: cipherForChain (hex):", bytesToHex(cipherForChain.slice(0,16)) + "...");
+    console.log("buildPartialTransaction: Relayer PubKey for feePayer:", relayerB58PublicKey);
 
-    const connection = new Connection(SOLANA_RPC_URL, 'confirmed'); // Added commitment level
+    const connection = new Connection(SOLANA_RPC_URL, 'confirmed');
+
+    // Fetch a fresh blockhash just before building the transaction
+    console.log("buildPartialTransaction: Fetching fresh blockhash...");
+    const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
+    console.log(`  buildPartialTransaction: Fresh blockhash: ${blockhash}, LastValidBlockHeight: ${lastValidBlockHeight}`);
 
     // 1. Derive the PDA for the crush account
     const pdaSeeds = [
         Buffer.from("crush"), 
         tag                     
     ];
-    // For findProgramAddressSync, seeds must be Buffer[] or Uint8Array[]
     const [crushPda, crushPdaBump] = PublicKey.findProgramAddressSync(
         pdaSeeds.map(seed => seed instanceof Uint8Array ? seed : Buffer.from(seed)), 
         CRUSH_PROGRAM_ID
@@ -635,10 +675,16 @@ async function buildPartialTransaction(skPrime, pkPrime, tag, cipherForChain) {
     console.log(`  Crush PDA: ${crushPda.toBase58()}, Bump: ${crushPdaBump}`);
 
     // 2. Create the instruction
+    // Order must match the Anchor program's SubmitCrush accounts struct:
+    // 1. crush_pda (Account<'info, CrushPda>)
+    // 2. user_signer (Signer<'info>)      <- This is pkPrime
+    // 3. relayer (Signer<'info>)          <- This is relayerPublicKeyString, also TX feePayer
+    // 4. system_program (Program<'info, System>)
     const keys = [
-        { pubkey: crushPda, isSigner: false, isWritable: true },                  // crush_pda
-        { pubkey: new PublicKey(pkPrime), isSigner: true, isWritable: true },   // signer (pkPrime) & payer
-        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false } // system_program
+        { pubkey: crushPda, isSigner: false, isWritable: true },
+        { pubkey: new PublicKey(pkPrime), isSigner: true, isWritable: false }, // user_signer (pkPrime)
+        { pubkey: new PublicKey(relayerB58PublicKey), isSigner: true, isWritable: true }, // relayer (rent and tx fee payer)
+        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false } 
     ];
 
     const instructionName = "submit_crush";
@@ -662,13 +708,17 @@ async function buildPartialTransaction(skPrime, pkPrime, tag, cipherForChain) {
     });
 
     // 3. Create the transaction
-    const { blockhash } = await connection.getLatestBlockhash();
-    console.log(`  Recent blockhash: ${blockhash}`);
-
     const transaction = new Transaction();
     transaction.add(instruction);
     transaction.recentBlockhash = blockhash;
-    transaction.feePayer = new PublicKey(pkPrime); 
+    
+    // ***** CRITICAL CHANGE: Set relayer as fee payer BEFORE pkPrime signs *****
+    if (!relayerB58PublicKey) {
+        console.error("Relayer public key is not provided to buildPartialTransaction!");
+        throw new Error("Relayer public key missing for transaction construction.");
+    }
+    transaction.feePayer = new PublicKey(relayerB58PublicKey);
+    console.log(`  Transaction feePayer set to Relayer: ${transaction.feePayer.toBase58()}`);
 
     const messageToSign = transaction.compileMessage(); 
     const signature = ed25519.sign(messageToSign.serialize(), skPrime);
@@ -973,6 +1023,19 @@ async function handleSendCrush() {
         updateStatusMessage("kWallet or kIndex not available. Please connect and sign first.", true);
         return;
     }
+    // Ensure relayer public key is available
+    if (!relayerPublicKeyString) {
+        try {
+            await fetchRelayerPublicKey(); // Attempt to fetch if not already available
+            if (!relayerPublicKeyString) { // Check again after fetch attempt
+                 updateStatusMessage("Relayer configuration not loaded. Cannot send crush.", true);
+                 return;
+            }
+        } catch (error) {
+            // Error is already logged by fetchRelayerPublicKey, and status message updated
+            return; 
+        }
+    }
     
     updateStatusMessage("Preparing your secret crush...");
     let myFid;
@@ -1015,9 +1078,9 @@ async function handleSendCrush() {
         updateStatusMessage("Encrypting payload...");
         const cipherForChain = await encryptPayload(K_AB, myFid, selectedTargetUser.fid, "");
         updateStatusMessage("Building partial transaction...");
-        const base64Tx = await buildPartialTransaction(skPrime, pkPrime, tag, cipherForChain);
+        const base64Tx = await buildPartialTransaction(skPrime, pkPrime, tag, cipherForChain, relayerPublicKeyString);
         updateStatusMessage("Sending transaction to relay...");
-        const relayResponse = await fetch(`${API_ROOT}/relay`, {
+        const relayResponse = await fetch(`${API_ROOT}/api/relay`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', },
             body: JSON.stringify({ tx: base64Tx }),
