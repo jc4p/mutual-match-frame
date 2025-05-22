@@ -6,58 +6,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
     <meta name="fc:frame" content='{"version":"next","imageUrl":"https://placehold.co/1200x800/png?text=Mutual+Match","button":{"title":"Spill Your Secrets","action":{"type":"launch_frame","name":"Secret Match","url":"https://mutual-match.kasra.codes","splashImageUrl":"https://placehold.co/200x200/png","splashBackgroundColor":"#FFFFFF"}}}' />
     <title>Mutual Match</title>
-    <style>
-      #howItWorksBtn {
-        position: fixed;
-        top: 10px;
-        right: 10px;
-        padding: 8px 12px;
-        background-color: #f0f0f0;
-        border: 1px solid #ccc;
-        border-radius: 5px; /* Updated */
-        cursor: pointer;
-        z-index: 999; /* Updated */
-      }
-
-      #howItWorksModalOverlay {
-        display: none;
-        position: fixed;
-        top: 0;
-        left: 0;
-        width: 100%;
-        height: 100%;
-        background-color: rgba(0,0,0,0.5);
-        z-index: 1000; /* Updated */
-      }
-
-      #howItWorksModalContent {
-        position: absolute;
-        top: 50%;
-        left: 50%;
-        transform: translate(-50%, -50%);
-        background-color: white;
-        padding: 20px;
-        border-radius: 8px;
-        max-width: 600px; /* Updated */
-        max-height: 80vh; /* Updated */
-        overflow-y: auto; /* Changed to overflow-y */
-        box-shadow: 0 4px 15px rgba(0,0,0,0.2); /* Added */
-        z-index: 1001; /* Added */
-      }
-
-      #howItWorksCloseBtn {
-        position: absolute;
-        top: 10px;
-        right: 10px;
-        background: none;
-        border: none;
-        font-size: 1.5em;
-        cursor: pointer;
-      }
-    </style>
   </head>
   <body>
-    <button id="howItWorksBtn">[?] How It Works</button>
+    <button id="howItWorksBtn">❓</button>
 
     <div id="howItWorksModalOverlay">
       <div id="howItWorksModalContent">
