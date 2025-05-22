@@ -1140,7 +1140,7 @@ function displayUserIndex(indexArray) {
                     <strong>Status:</strong> ${entry.status || 'N/A'} ${entry.status === "mutual" ? `&#10024; <span class="mutual-info">${entry.revealedInfo || 'It\'s a Match!'}</span>` : ""} <br>
                     <strong>Timestamp:</strong> ${entry.ts ? new Date(entry.ts).toLocaleString() : 'N/A'} <br>
                     <small>Tag: ${tagHexSnippet}...</small><br>
-                    ${entry.txSignature ? `<small>Tx: <a href="https://explorer.solana.com/tx/${entry.txSignature}?cluster=mainnet" target="_blank" rel="noopener noreferrer">${entry.txSignature.substring(0,10)}...</a></small><br>` : '' }
+                    ${entry.txSignature ? `<small>Tx: <a href="https://solscan.io/tx/${entry.txSignature}?cluster=mainnet" target="_blank" rel="noopener noreferrer">${entry.txSignature.substring(0,10)}...</a></small><br>` : '' }
                 `;
                 list.appendChild(item);
             });
@@ -1264,7 +1264,7 @@ async function handleSendCrush() {
                     updateStatusMessage("Transaction confirmed on-chain! Processing crush details...");
                     console.log(`Transaction ${finalTxSignature} successfully confirmed (${statusResult.status}).`);
                     confirmationStatus = "pending"; // Still "pending" for PDA check, but client-side confirmed.
-                    uiMessage = `Crush sent and confirmed on Solana! Tx: <a href="https://explorer.solana.com/tx/${finalTxSignature}?cluster=mainnet" target="_blank" rel="noopener noreferrer">${finalTxSignature.substring(0,10)}...</a>`;
+                    uiMessage = `Crush sent and confirmed on Solana! Tx: <a href="https://solscan.io/tx/${finalTxSignature}?cluster=mainnet" target="_blank" rel="noopener noreferrer">${finalTxSignature.substring(0,10)}...</a>`;
                     clearInterval(pollingIntervalId);
                     await finalizeCrushSubmission(true); 
                 } else if (statusResult.status === 'failed') {
@@ -1272,7 +1272,7 @@ async function handleSendCrush() {
                     updateStatusMessage(`Transaction ${finalTxSignature.substring(0,10)}... FAILED on-chain.`, true);
                     confirmationStatus = "failed_on_chain";
                     confirmationErrorDetail = JSON.stringify(statusResult.error);
-                    uiMessage = `Crush FAILED to process on Solana. Tx: <a href="https://explorer.solana.com/tx/${finalTxSignature}?cluster=mainnet" target="_blank" rel="noopener noreferrer">${finalTxSignature.substring(0,10)}...</a>. Error: ${confirmationErrorDetail}`;
+                    uiMessage = `Crush FAILED to process on Solana. Tx: <a href="https://solscan.io/tx/${finalTxSignature}?cluster=mainnet" target="_blank" rel="noopener noreferrer">${finalTxSignature.substring(0,10)}...</a>. Error: ${confirmationErrorDetail}`;
                     clearInterval(pollingIntervalId);
                     await finalizeCrushSubmission(false); 
                 } else if (pollingAttempts >= MAX_POLLING_ATTEMPTS) {
@@ -1280,7 +1280,7 @@ async function handleSendCrush() {
                     updateStatusMessage(`Transaction ${finalTxSignature.substring(0,10)}... confirmation timed out. It might still succeed. Check explorer.`, true);
                     confirmationStatus = "pending_confirmation_timeout";
                     confirmationErrorDetail = "Confirmation polling timed out.";
-                    uiMessage = `Crush sent (Tx: <a href="https://explorer.solana.com/tx/${finalTxSignature}?cluster=mainnet" target="_blank" rel="noopener noreferrer">${finalTxSignature.substring(0,10)}...</a>), but confirmation polling timed out. It may process on-chain shortly.`;
+                    uiMessage = `Crush sent (Tx: <a href="https://solscan.io/tx/${finalTxSignature}?cluster=mainnet" target="_blank" rel="noopener noreferrer">${finalTxSignature.substring(0,10)}...</a>), but confirmation polling timed out. It may process on-chain shortly.`;
                     clearInterval(pollingIntervalId);
                     await finalizeCrushSubmission(false); 
                 } else {
@@ -1298,7 +1298,7 @@ async function handleSendCrush() {
                     } else {
                         confirmationErrorDetail = err.message;
                     }
-                    uiMessage = `Crush sent (Tx: <a href="https://explorer.solana.com/tx/${finalTxSignature}?cluster=mainnet" target="_blank" rel="noopener noreferrer">${finalTxSignature.substring(0,10)}...</a>), but an error occurred while checking status.`;
+                    uiMessage = `Crush sent (Tx: <a href="https://solscan.io/tx/${finalTxSignature}?cluster=mainnet" target="_blank" rel="noopener noreferrer">${finalTxSignature.substring(0,10)}...</a>), but an error occurred while checking status.`;
                     clearInterval(pollingIntervalId);
                     await finalizeCrushSubmission(false); 
                 }
