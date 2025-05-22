@@ -484,13 +484,13 @@ function populateHowItWorksModal() {
             <li>✍️ <strong>Sign In:</strong> You sign a message with your wallet – this keeps your main Farcaster account details separate and generates a special key for this app.</li>
             <li>🤫 <strong>Express a Crush:</strong> You pick someone you follow. The app uses clever cryptography to prepare your 'crush' message.</li>
             <li>🔒 <strong>Encryption Magic:</strong> Your choice is encrypted using keys that only you and your potential crush can generate if you <em>both</em> express interest. The server or anyone else can't read it.</li>
-            <li>🔗 <strong>On-Chain (but private!):</strong> An encrypted piece of data is sent to the Solana blockchain. This data doesn't reveal who you are or who you crushed on.</li>
+            <li>🔗 <strong>OnChain (but private!):</strong> An encrypted piece of data is sent to the Solana blockchain. This data doesn't reveal who you are or who you crushed on.</li>
             <li>🎉 <strong>Mutual Match:</strong> If the person you crushed on also crushes on you using this app, the system detects a match! Both of you will be notified. Otherwise, your crush remains a secret.</li>
         </ul>
 
         <h3>Security & Privacy</h3>
         <ul>
-            <li>🛡️ <strong>Stealthy Transactions:</strong> Your actual wallet address isn't directly linked to the on-chain crush data. We use 'stealth keys' for this.</li>
+            <li>🛡️ <strong>Stealthy Transactions:</strong> Your actual wallet address isn't directly linked to the onchain crush data. We use 'stealth keys' for this.</li>
             <li>🔐 <strong>Server Can't Peek:</strong> The list of your crushes stored on our server is encrypted with a key derived from your initial wallet signature. We can't decrypt it.</li>
             <li>🚫 <strong>Not <em>Technically</em> Zero-Knowledge:</strong> While we use strong encryption and privacy techniques, this system isn't strictly 'zero-knowledge' in the formal cryptographic sense. However, it's designed to be highly private and secure for its purpose.</li>
         </ul>
@@ -499,7 +499,7 @@ function populateHowItWorksModal() {
         <ul>
             <li>Discreet way to find mutual connections.</li>
             <li>Strong encryption protects your choices.</li>
-            <li>Anonymous on-chain interactions.</li>
+            <li>Anonymous onchain interactions.</li>
         </ul>
         `;
         
