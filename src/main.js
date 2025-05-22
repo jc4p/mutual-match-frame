@@ -5,7 +5,7 @@ import { hmac } from '@noble/hashes/hmac';
 import { ed25519, x25519, edwardsToMontgomeryPub, edwardsToMontgomeryPriv } from '@noble/curves/ed25519';
 import { concatBytes, randomBytes, bytesToHex as nobleBytesToHex, hexToBytes as nobleHexToBytes, utf8ToBytes, bytesToUtf8 } from '@noble/hashes/utils'; // For randomBytes (nonce) and concatBytes
 import { xchacha20poly1305 } from '@noble/ciphers/chacha.js'; 
-import { aesGcm } from '@noble/ciphers/aes';
+import { gcm } from '@noble/ciphers/aes';
 import bs58 from 'bs58';
 import * as borsh from '@coral-xyz/borsh'; // Added Borsh
 import {
@@ -705,7 +705,7 @@ async function encryptIndex(indexObject, kIndex) {
     if (kIndex.length !== 32) throw new Error("kIndex must be 32 bytes for AES-256-GCM.");
     const plaintext = utf8ToBytes(JSON.stringify(indexObject));
     const nonce = randomBytes(12); // 12 bytes (96 bits) is recommended for AES-GCM
-    const aes = aesGcm(kIndex, nonce); // noble/ciphers automatically selects AES mode based on key length
+    const aes = gcm(kIndex, nonce); // noble/ciphers automatically selects AES mode based on key length
     const ciphertext = await aes.encrypt(plaintext);
     // Combine nonce and ciphertext for storage: nonce (12B) + ciphertext
     const encryptedBlob = concatBytes(nonce, ciphertext);
@@ -722,7 +722,7 @@ async function decryptIndex(encryptedBase64, kIndex) {
     const nonce = encryptedBlob.slice(0, 12);
     const ciphertext = encryptedBlob.slice(12);
     
-    const aes = aesGcm(kIndex, nonce);
+    const aes = gcm(kIndex, nonce);
     try {
         const plaintext = await aes.decrypt(ciphertext);
         return JSON.parse(bytesToUtf8(plaintext));
