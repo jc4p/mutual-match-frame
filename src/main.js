@@ -964,6 +964,13 @@ async function loadAndDisplayUserIndex(displayStaleOnError = false) {
         return; // Stop further processing if initial load fails badly
     }
 
+    // Log the entire decrypted index to see the state of each entry
+    console.log("--- Full Decrypted User Index (before on-chain checks) ---");
+    localDecryptedIndex.forEach((entry, idx) => {
+        console.log(`Entry ${idx}:`, JSON.stringify(entry, null, 2));
+    });
+    console.log("--- End Full Decrypted User Index ---");
+
     // Now, check status of pending crushes
     let anIndexWasUpdated = false;
     const connection = new Connection(SOLANA_RPC_URL, 'confirmed');
