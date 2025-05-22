@@ -249,40 +249,116 @@ async function searchUsers(query) {
             `).join('');
 
             document.querySelectorAll('.search-result-item').forEach(item => {
-                item.addEventListener('click', () => {
+                item.addEventListener('click', async () => { // Make listener async
                     const primarySolAddress = item.dataset.primarysoladdress;
+                    const displayName = item.dataset.displayname;
+                    const username = item.dataset.username;
+
                     if (!primarySolAddress) {
                         resultsDiv.innerHTML = `
-                            <p>Selected: <strong>${item.dataset.displayname}</strong> (@${item.dataset.username})</p>
-                            <p style="color: red;">This user does not have a verified primary Solana address. Cannot proceed with crush.</p>
+                            <p>Selected: <strong>${displayName}</strong> (@${username})</p>
+                            <p style="color: red;">This user does not have a verified primary Solana address. Cannot proceed.</p>
                             <p><button id="searchAgainBtn">Search Again</button></p>
                         `;
-                        resultsDiv.classList.add('populated'); // Ensure populated
+                        resultsDiv.classList.add('populated');
                         document.getElementById('searchAgainBtn').addEventListener('click', () => {
                              document.getElementById('userSearchInput').value = '';
-                             resultsDiv.innerHTML = ''; // Clear selection message
-                             resultsDiv.classList.remove('populated'); // Remove on clear
+                             resultsDiv.innerHTML = '';
+                             resultsDiv.classList.remove('populated');
                         });
-                        selectedTargetUser = null; // Clear previous selection
+                        selectedTargetUser = null;
                         return;
                     }
 
-                    selectedTargetUser = {
-                        fid: parseInt(item.dataset.fid),
-                        username: item.dataset.username,
-                        display_name: item.dataset.displayname,
-                        pfp_url: item.dataset.pfpurl,
-                        primary_sol_address: primarySolAddress
-                    };
-                    console.log("Selected target user:", selectedTargetUser);
-                    resultsDiv.innerHTML = `
-                        <p>Selected: <strong>${selectedTargetUser.display_name}</strong> (@${selectedTargetUser.username})</p>
-                        <p>Ready to derive stealth key and proceed.</p>
-                        <button id="sendCrushBtn">Send Secret Crush</button>
-                    `;
-                    resultsDiv.classList.add('populated'); // Ensure populated
-                    document.getElementById('userSearchInput').value = '';
-                    document.getElementById('sendCrushBtn').addEventListener('click', handleSendCrush);
+                    // Temporarily show loading while fetching app key
+                    resultsDiv.innerHTML = `<p>Checking compatibility for <strong>${displayName}</strong> (@${username})...</p>`;
+                    resultsDiv.classList.add('populated');
+                    document.getElementById('userSearchInput').value = ''; // Clear search input
+
+                    try {
+                        console.log(`Fetching app key for target user: ${primarySolAddress} (@${username})`);
+                        const appKeyResponse = await fetch(`${API_ROOT}/api/user/${primarySolAddress}/app-pubkey`);
+                        
+                        let targetUserAppPublicKeyHex = null;
+                        let targetUserAppPublicKeyBytes = null;
+
+                        if (!appKeyResponse.ok) {
+                            if (appKeyResponse.status === 404) {
+                                resultsDiv.innerHTML = `
+                                    <p>Selected: <strong>${displayName}</strong> (@${username})</p>
+                                    <p style="color: orange;">${displayName} needs to open this app and sign-in at least once. Gently nudge them to!</p>
+                                    <p><button id="searchAgainBtn">Search Again</button></p>
+                                `;
+                                document.getElementById('searchAgainBtn').addEventListener('click', () => {
+                                    document.getElementById('userSearchInput').value = '';
+                                    resultsDiv.innerHTML = '';
+                                    resultsDiv.classList.remove('populated');
+                                });
+                                selectedTargetUser = null; // Clear selection
+                                return;
+                            } else {
+                                const errData = await appKeyResponse.json().catch(() => ({}));
+                                throw new Error(`API Error (${appKeyResponse.status}): ${errData.error || appKeyResponse.statusText}`);
+                            }
+                        }
+
+                        const appKeyData = await appKeyResponse.json();
+                        targetUserAppPublicKeyHex = appKeyData.appPublicKeyHex;
+
+                        if (!targetUserAppPublicKeyHex) {
+                            resultsDiv.innerHTML = `
+                                <p>Selected: <strong>${displayName}</strong> (@${username})</p>
+                                <p style="color: orange;">Could not retrieve app key for ${displayName}, even though the API responded. They may need to re-initialize the app. Try asking them to sign in again.</p>
+                                <p><button id="searchAgainBtn">Search Again</button></p>
+                            `;
+                             document.getElementById('searchAgainBtn').addEventListener('click', () => {
+                                document.getElementById('userSearchInput').value = '';
+                                resultsDiv.innerHTML = '';
+                                resultsDiv.classList.remove('populated');
+                            });
+                            selectedTargetUser = null; // Clear selection
+                            return;
+                        }
+
+                        targetUserAppPublicKeyBytes = hexToBytes(targetUserAppPublicKeyHex);
+                        if (targetUserAppPublicKeyBytes.length !== 32) {
+                            throw new Error("Fetched target app public key is not 32 bytes.");
+                        }
+                        console.log(`Successfully fetched app public key for @${username}: ${targetUserAppPublicKeyHex.substring(0,8)}...`);
+
+                        // All checks passed, store selected user and their app key
+                        selectedTargetUser = {
+                            fid: parseInt(item.dataset.fid),
+                            username: username,
+                            display_name: displayName,
+                            pfp_url: item.dataset.pfpurl,
+                            primary_sol_address: primarySolAddress,
+                            appPublicKeyHex: targetUserAppPublicKeyHex, // Store fetched key
+                            appPublicKeyBytes: targetUserAppPublicKeyBytes // Store fetched key bytes
+                        };
+                        console.log("Selected target user (with app key):", selectedTargetUser);
+                        resultsDiv.innerHTML = `
+                            <p>Selected: <strong>${selectedTargetUser.display_name}</strong> (@${selectedTargetUser.username})</p>
+                            <p style="color: green;">Compatibility check passed! Ready to send crush.</p>
+                            <button id="sendCrushBtn">Send Secret Crush</button>
+                        `;
+                        resultsDiv.classList.add('populated'); 
+                        document.getElementById('sendCrushBtn').addEventListener('click', handleSendCrush);
+
+                    } catch (error) {
+                        console.error("Error during target user selection or app key fetch:", error);
+                        resultsDiv.innerHTML = `
+                            <p>Selected: <strong>${displayName}</strong> (@${username})</p>
+                            <p style="color: red;">Error checking compatibility: ${error.message}</p>
+                            <p><button id="searchAgainBtn">Search Again</button></p>
+                        `;
+                        document.getElementById('searchAgainBtn').addEventListener('click', () => {
+                            document.getElementById('userSearchInput').value = '';
+                            resultsDiv.innerHTML = '';
+                            resultsDiv.classList.remove('populated');
+                        });
+                        selectedTargetUser = null;
+                    }
                 });
             });
         } else {
@@ -1303,6 +1379,12 @@ async function handleSendCrush() {
         updateStatusMessage("No target user with a Solana address selected!", true);
         return;
     }
+    // Ensure appPublicKeyHex is present from the selection step
+    if (!selectedTargetUser.appPublicKeyHex || !selectedTargetUser.appPublicKeyBytes) {
+        updateStatusMessage("Target user's app key not available. Please re-select the user.", true);
+        console.error("handleSendCrush: selectedTargetUser is missing appPublicKeyHex or appPublicKeyBytes. This should have been caught at selection.");
+        return;
+    }
     if (!sessionKWallet || !sessionKIndex || !sessionAppPublicKeyHex) { 
         updateStatusMessage("User session keys (kWallet, kIndex, or AppPublicKeyHex) not available. Please connect and sign first.", true);
         return;
@@ -1348,40 +1430,10 @@ async function handleSendCrush() {
         return;
     }
     
-    // --- New: Fetch target user's APP-SPECIFIC public key ---
-    let targetUserAppPublicKeyHex;
-    let targetUserAppPublicKeyBytes;
-    try {
-        updateStatusMessage(`Fetching app key for @${selectedTargetUser.username}...`);
-        // Assume selectedTargetUser has their primary_sol_address which is their main wallet address
-        // The API endpoint for app-pubkey should be keyed by their main wallet address.
-        const appKeyResponse = await fetch(`${API_ROOT}/api/user/${selectedTargetUser.primary_sol_address}/app-pubkey`);
-        if (!appKeyResponse.ok) {
-            if (appKeyResponse.status === 404) {
-                 updateStatusMessage(`@${selectedTargetUser.username} hasn't used MutualMatch yet. They need to sign in once.`, true);
-            } else {
-                const errData = await appKeyResponse.json().catch(() => ({}));
-                updateStatusMessage(`Error fetching app key for @${selectedTargetUser.username}: ${errData.error || appKeyResponse.statusText}`, true);
-            }
-            return; 
-        }
-        const appKeyData = await appKeyResponse.json();
-        targetUserAppPublicKeyHex = appKeyData.appPublicKeyHex;
-        if (!targetUserAppPublicKeyHex) {
-             updateStatusMessage(`App key not found for @${selectedTargetUser.username}, even though API responded OK. They might need to use the app.`, true);
-             return;
-        }
-        targetUserAppPublicKeyBytes = hexToBytes(targetUserAppPublicKeyHex);
-        if (targetUserAppPublicKeyBytes.length !== 32) {
-            throw new Error("Fetched target app public key is not 32 bytes.");
-        }
-        console.log(`Successfully fetched app public key for @${selectedTargetUser.username}: ${targetUserAppPublicKeyHex.substring(0,8)}...`);
-    } catch (fetchAppKeyError) {
-        console.error(`Error fetching or processing app public key for ${selectedTargetUser.primary_sol_address} (@${selectedTargetUser.username}):`, fetchAppKeyError);
-        updateStatusMessage(`Could not get app key for @${selectedTargetUser.username}. ${fetchAppKeyError.message}`, true);
-        return;
-    }
-    // --- End Fetch target user's APP-SPECIFIC public key ---
+    // --- Target user's APP-SPECIFIC public key is now pre-fetched and stored in selectedTargetUser ---
+    const targetUserAppPublicKeyHex = selectedTargetUser.appPublicKeyHex;
+    const targetUserAppPublicKeyBytes = selectedTargetUser.appPublicKeyBytes;
+    // --- End Target user's APP-SPECIFIC public key ---
 
     const searchResultsDiv = document.getElementById('searchResults');
     if(searchResultsDiv) searchResultsDiv.innerHTML = "<p>Processing your secret crush... Generating keys...</p>";
