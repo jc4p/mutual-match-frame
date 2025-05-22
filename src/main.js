@@ -3,10 +3,11 @@ import * as frame from '@farcaster/frame-sdk';
 import { sha256 } from '@noble/hashes/sha2';
 import { hmac } from '@noble/hashes/hmac';
 import { ed25519, x25519, edwardsToMontgomeryPub, edwardsToMontgomeryPriv } from '@noble/curves/ed25519';
-import { concatBytes, randomBytes } from '@noble/hashes/utils'; // For randomBytes (nonce) and concatBytes
+import { concatBytes, randomBytes, bytesToHex as nobleBytesToHex, hexToBytes as nobleHexToBytes, utf8ToBytes, bytesToUtf8 } from '@noble/hashes/utils'; // For randomBytes (nonce) and concatBytes
 import { xchacha20poly1305 } from '@noble/ciphers/chacha.js'; 
-import { bytesToHex } from '@noble/hashes/utils';
+import { aesGcm } from '@noble/ciphers/aes';
 import bs58 from 'bs58';
+import * as borsh from '@coral-xyz/borsh'; // Added Borsh
 import {
     Connection,
     PublicKey,
@@ -19,9 +20,11 @@ import { Buffer } from 'buffer'; // Import Buffer
 
 const API_ROOT = 'https://mutual-match-api.kasra.codes';
 const SOLANA_RPC_URL = `${API_ROOT}/api/solana-rpc`; 
-// Using SystemProgram.programId as a valid placeholder for CRUSH_PROGRAM_ID until actual is available
-const CRUSH_PROGRAM_ID = SystemProgram.programId; 
-// const CRUSH_PROGRAM_ID = new PublicKey('YOUR_CRUSH_PROGRAM_ID_HERE'); // Replace with your actual Program ID
+const CRUSH_PROGRAM_ID = new PublicKey('8dscc2LJf8HV3737bGNfjPT7JAkezNvGujdXFwgsYXDV'); // Updated Program ID
+
+// Alias noble functions to avoid name clashes if any, and for consistency
+const bytesToHex = nobleBytesToHex;
+const hexToBytes = nobleHexToBytes;
 
 console.log("Encrypted Mutual Match App Initializing...");
 
@@ -32,6 +35,15 @@ const originalConsole = {
     warn: console.warn.bind(console),
     error: console.error.bind(console),
 };
+
+function updateStatusMessage(message, isError = false) {
+    const statusMessageDiv = document.getElementById('statusMessage');
+    if (statusMessageDiv) {
+        statusMessageDiv.innerHTML = `<p${isError ? ' style="color:red;"' : ''}>${message}</p>`;
+    }
+    if (isError) console.error("Status Update (Error):", message);
+    else console.log("Status Update:", message);
+}
 
 function addLogToDebugConsole(message, level = 'log') {
     const consoleContent = document.getElementById('debug-console-content');
@@ -171,8 +183,9 @@ function initDebugConsole() {
 // The PRD mentions `walletProvider.signMessage`.
 // The Farcaster SDK provides this via sdk.experimental.getSolanaProvider()
 
-// Store kWallet, publicKey, and selected target user in memory for the session
+// Store kWallet, kIndex, publicKey, and selected target user in memory for the session
 let sessionKWallet = null;
+let sessionKIndex = null; // Will be derived from kWallet
 let sessionPublicKey = null;
 let selectedTargetUser = null; // To store { fid, username, display_name, pfp_url, primary_sol_address }
 
@@ -281,13 +294,7 @@ async function connectAndSign() {
     console.log("--- connectAndSign called ---");
 
     const contentDiv = document.getElementById('content');
-    const statusMessageDiv = document.getElementById('statusMessage');
-
-    if (!contentDiv || !statusMessageDiv) {
-        console.error("UI elements (content/statusMessage) not found");
-        return null;
-    }
-    statusMessageDiv.innerHTML = "<p>Attempting to get Solana Provider...</p>";
+    updateStatusMessage("Attempting to get Solana Provider...");
 
     let solanaProvider = null;
     try {
@@ -295,37 +302,35 @@ async function connectAndSign() {
 
         if (!solanaProvider) {
             console.error("await frame.sdk.experimental.getSolanaProvider() returned null or undefined.");
-            statusMessageDiv.innerHTML = '<p>Error: Solana Wallet Provider not available.</p>';
-            contentDiv.innerHTML = '<p>Please ensure your Farcaster client is set up correctly. Check debug console.</p>';
+            updateStatusMessage('Error: Solana Wallet Provider not available.', true);
+            if(contentDiv) contentDiv.innerHTML = '<p>Please ensure your Farcaster client is set up correctly.</p>';
             return null;
         }
         
-        statusMessageDiv.innerHTML = "<p>Solana Provider found! Connecting to wallet...</p>";
+        updateStatusMessage("Solana Provider found! Connecting to wallet...");
 
         let publicKeyString; 
         try {
-            console.log("Attempting solanaProvider connect...");
-            statusMessageDiv.innerHTML = "<p>Awaiting wallet connection approval...</p>";
+            updateStatusMessage("Awaiting wallet connection approval...");
             const connectionResponse = await solanaProvider.request({ method: 'connect' });
-            console.log("solanaProvider connect response:", connectionResponse);
             publicKeyString = connectionResponse?.publicKey
             console.log('publicKeyString:', publicKeyString);
         } catch (connectError) {
-            console.error("Error connecting to Solana wallet via provider connect:", connectError);
-            statusMessageDiv.innerHTML = `<p>Error connecting to wallet.</p>`;
-            contentDiv.innerHTML = `<p>${connectError.message}. You might need to approve the connection.</p>`;
+            console.error("Error connecting to Solana wallet:", connectError);
+            updateStatusMessage('Error connecting to wallet.', true);
+            if(contentDiv) contentDiv.innerHTML = `<p>${connectError.message}. You might need to approve the connection.</p>`;
             return null;
         }
 
         if (!publicKeyString || typeof publicKeyString !== 'string') {
             console.error("Could not get publicKey as a string from Solana provider. Received:", publicKeyString);
-            statusMessageDiv.innerHTML = '<p>Error: Could not get public key string.</p>';
-            contentDiv.innerHTML = '<p>Wallet might not be connected/approved or provider returned unexpected format. Check debug console.</p>';
+            updateStatusMessage('Error: Could not get public key string.', true);
+            if(contentDiv) contentDiv.innerHTML = '<p>Wallet might not be connected/approved or provider returned unexpected format.</p>';
             return null;
         }
         
         console.log("Successfully obtained publicKey string:", publicKeyString);
-        statusMessageDiv.innerHTML = `<p>Wallet connected: ${publicKeyString.slice(0,4)}...${publicKeyString.slice(-4)}. Signing message...</p>`;
+        updateStatusMessage(`Wallet connected: ${publicKeyString.slice(0,4)}...${publicKeyString.slice(-4)}. Signing message...`);
 
         const messageString = "This is a message to confirm you are logging into encrypted mutual match using your Warplet!";
         console.log(`Attempting to sign message: "${messageString}"`);
@@ -373,36 +378,41 @@ async function connectAndSign() {
 
             if (!decodedSuccessfully) {
                  console.error("Could not decode signature as Base58 or Base64 to a 64-byte array. Original string:", signatureString);
-                 statusMessageDiv.innerHTML = '<p>Error: Could not decode signature.</p>';
-                 contentDiv.innerHTML = '<p>The signature format from the wallet was undecodable or incorrect length.</p>';
+                 updateStatusMessage('Error: Could not decode signature.', true);
+                 if(contentDiv) contentDiv.innerHTML = '<p>The signature format from the wallet was undecodable or incorrect length.</p>';
                  return null;
             }
         } else {
             console.error("Unexpected signature format from signMessage. Expected an object with a string 'signature' property. Received:", signedMessageResult);
-            statusMessageDiv.innerHTML = '<p>Error: Unexpected signature format.</p>';
-            contentDiv.innerHTML = '<p>Received an unexpected signature format from the wallet for the message signature.</p>';
+            updateStatusMessage('Error: Unexpected signature format.', true);
+            if(contentDiv) contentDiv.innerHTML = '<p>Received an unexpected signature format from the wallet for the message signature.</p>';
             return null;
         }
 
         if (!signature || signature.length === 0) {
              console.error("Signature is null or empty after processing.");
-             statusMessageDiv.innerHTML = '<p>Error: Signature processing failed.</p>';
+             updateStatusMessage('Error: Signature processing failed.', true);
              return null;
         }
 
-        const kWallet = sha256(signature);
-        sessionKWallet = kWallet;
+        sessionKWallet = sha256(signature);
         sessionPublicKey = publicKeyString; 
 
-        console.log('Raw signature (first 16 bytes hex):', bytesToHex(signature.slice(0,16)));
-        console.log('kWallet (hex, first 8 bytes):', bytesToHex(kWallet.slice(0,8)));
+        // Derive kIndex PRD 4.2: kIndex = SHA256("HOT" || kWallet)
+        const hotPrefix = utf8ToBytes("HOT");
+        sessionKIndex = sha256(concatBytes(hotPrefix, sessionKWallet));
+
+        console.log('Raw signature (first 16 bytes hex): ', bytesToHex(signature.slice(0,16)));
+        console.log('kWallet (hex, first 8 bytes):', bytesToHex(sessionKWallet.slice(0,8)));
+        console.log('kIndex (hex, first 8 bytes):', bytesToHex(sessionKIndex.slice(0,8)));
         
-        statusMessageDiv.innerHTML = `<p>Successfully signed message and derived kWallet!</p>`;
+        updateStatusMessage(`Signed in! Wallet: ${publicKeyString.slice(0,4)}...${publicKeyString.slice(-4)}`);
         
-        contentDiv.innerHTML = `
+        if(contentDiv) contentDiv.innerHTML = `
             <p>Welcome! Search for a user to send a secret crush.</p>
             <input type="text" id="userSearchInput" class="user-search-input" placeholder="Search Farcaster users by name or FID...">
             <div id="searchResults" class="search-results-container"></div>
+            <div id="userIndexContainerPlaceholder"></div>
         `;
         document.getElementById('userSearchInput').addEventListener('input', (e) => {
             debouncedSearchUsers(e.target.value);
@@ -411,12 +421,15 @@ async function connectAndSign() {
         const connectButton = document.getElementById('connectWalletBtn');
         if(connectButton) connectButton.style.display = 'none';
 
-        return { kWallet, publicKey: publicKeyString }; // Return string publicKey
+        // Attempt to load existing index from API after successful login
+        await loadAndDisplayUserIndex();
+
+        return { kWallet: sessionKWallet, publicKey: sessionPublicKey, kIndex: sessionKIndex }; 
 
     } catch (error) {
         console.error("Error in connectAndSign process:", error);
-        statusMessageDiv.innerHTML = `<p>Error: ${error.message}.</p>`;
-        contentDiv.innerHTML = `<p>See debug console for more details. Ensure your Farcaster wallet is set up and active.</p>`;
+        updateStatusMessage(`Error: ${error.message}.`, true);
+        if(contentDiv) contentDiv.innerHTML = `<p>See debug console for details. Ensure your Farcaster wallet is set up.</p>`;
         return null;
     }
 }
@@ -607,51 +620,45 @@ async function buildPartialTransaction(skPrime, pkPrime, tag, cipherForChain) {
     console.log("buildPartialTransaction: tag (for PDA, hex):", bytesToHex(tag));
     console.log("buildPartialTransaction: cipherForChain (hex):", bytesToHex(cipherForChain.slice(0,16)) + "...");
 
-    const connection = new Connection(SOLANA_RPC_URL);
+    const connection = new Connection(SOLANA_RPC_URL, 'confirmed'); // Added commitment level
 
     // 1. Derive the PDA for the crush account
-    // PRD: seeds = [b"crush", tag]
     const pdaSeeds = [
-        Buffer.from("crush"), // b"crush"
-        tag                     // The 32-byte tag derived earlier
+        Buffer.from("crush"), 
+        tag                     
     ];
-    const [crushPda, crushPdaBump] = await PublicKey.findProgramAddressSync(pdaSeeds, CRUSH_PROGRAM_ID);
+    // For findProgramAddressSync, seeds must be Buffer[] or Uint8Array[]
+    const [crushPda, crushPdaBump] = PublicKey.findProgramAddressSync(
+        pdaSeeds.map(seed => seed instanceof Uint8Array ? seed : Buffer.from(seed)), 
+        CRUSH_PROGRAM_ID
+    );
     console.log(`  Crush PDA: ${crushPda.toBase58()}, Bump: ${crushPdaBump}`);
 
     // 2. Create the instruction
-    // We need to know the exact structure of `submit_crush`'s accounts.
-    // Assuming: 0: crush_pda (writable), 1: signer (pkPrime, signer)
-    //           (Possibly SystemProgram if PDA needs init, but PRD suggests program handles init based on `filled` state)
     const keys = [
-        { pubkey: crushPda, isSigner: false, isWritable: true },
-        { pubkey: new PublicKey(pkPrime), isSigner: true, isWritable: false },
-        // { pubkey: SystemProgram.programId, isSigner: false, isWritable: false } // If needed
+        { pubkey: crushPda, isSigner: false, isWritable: true },                  // crush_pda
+        { pubkey: new PublicKey(pkPrime), isSigner: true, isWritable: true },   // signer (pkPrime) & payer
+        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false } // system_program
     ];
 
-    // The `data` for the instruction is just the cipher (112 bytes).
-    // Anchor typically prepends an 8-byte discriminator for the instruction name.
-    // We need to know this discriminator for `submit_crush`.
-    // For now, assuming a utility on the backend or a known constant.
-    // Let's represent the data as just the cipher for now, and assume the discriminator handling is either 
-    // not needed for manual construction this way OR will be prefixed by a helper / known constant.
-    // If using Anchor client, it handles this. Manually, we need it.
-    // Placeholder: const SUBMIT_CRUSH_DISCRIMINATOR = Buffer.from([...]); 
-    // const instructionData = Buffer.concat([SUBMIT_CRUSH_DISCRIMINATOR, Buffer.from(cipherForChain)]);
-    // For now, directly passing cipher. This will likely FAIL without the discriminator if calling an Anchor program.
-    // This part *critically* depends on how you call your Solana program method without the Anchor client.
-    // Typically, you hash 'global:submit_crush' or 'instruction:submit_crush' to get the 8-byte discriminator.
-    // For example: sha256('global:submit_crush').slice(0, 8)
-    // Let's simulate getting this discriminator for now.
     const instructionName = "submit_crush";
-    const sighash = sha256(`global:${instructionName}`).slice(0, 8); // Common Anchor sighash
-    const instructionData = Buffer.concat([Buffer.from(sighash), Buffer.from(cipherForChain)]);
+    const sighash = sha256(`global:${instructionName}`).slice(0, 8);
+    // Instruction arguments are tag and cipher, matching the Rust function
+    // submit_crush(ctx: Context<SubmitCrush>, _tag: [u8; 32], cipher: [u8;48])
+    // The _tag argument to the instruction itself:
+    const tagArgBuffer = Buffer.from(tag);
+    const cipherArgBuffer = Buffer.from(cipherForChain);
+    const instructionData = Buffer.concat([Buffer.from(sighash), tagArgBuffer, cipherArgBuffer]);
+
     console.log(`  Instruction data sighash (hex): ${bytesToHex(sighash)}`);
+    console.log(`  Instruction data tag arg (hex): ${bytesToHex(tagArgBuffer)}`);
+    console.log(`  Instruction data cipher arg (hex): ${bytesToHex(cipherArgBuffer.slice(0,8))}...`);
 
 
     const instruction = new TransactionInstruction({
         keys: keys,
         programId: CRUSH_PROGRAM_ID,
-        data: Buffer.from(instructionData),
+        data: instructionData,
     });
 
     // 3. Create the transaction
@@ -661,30 +668,17 @@ async function buildPartialTransaction(skPrime, pkPrime, tag, cipherForChain) {
     const transaction = new Transaction();
     transaction.add(instruction);
     transaction.recentBlockhash = blockhash;
-    transaction.feePayer = new PublicKey(pkPrime); // Stealth key is payer initially, relay will change
+    transaction.feePayer = new PublicKey(pkPrime); 
 
-    // 4. Sign with skPrime (MANUALLY using noble)
-    // We need to serialize the transaction message, sign its hash, then add the signature.
-    const messageToSign = transaction.compileMessage(); // Compiles the message to be signed
-    
-    // Noble ed25519.sign expects the hash of the message if it's too long, or the message itself.
-    // Solana transactions are typically signed over the sha256 hash of the message bytes.
-    // However, noble ed25519.sign can take the message directly.
-    // Let's confirm noble's behavior: it hashes the message if it's > 64 bytes.
-    // Transaction messages are usually larger, so it will hash internally.
+    const messageToSign = transaction.compileMessage(); 
     const signature = ed25519.sign(messageToSign.serialize(), skPrime);
     console.log(`  Signature with skPrime (hex, first 16B): ${bytesToHex(signature.slice(0,16))}...`);
 
-    // Add the signature to the transaction
-    // The addSignature method takes the public key and the signature
     transaction.addSignature(new PublicKey(pkPrime), Buffer.from(signature));
 
-    // 5. Serialize the partially signed transaction (relay expects this)
-    // The transaction is now signed by pkPrime. The feePayer (also pkPrime for now) signature is present.
-    // The relay will add its own signature as the *actual* feePayer.
     const serializedTransaction = transaction.serialize({
-        requireAllSignatures: false, // IMPORTANT: pkPrime is the only signer we add here
-        verifySignatures: false // We just signed it, verification can be done by relay/chain
+        requireAllSignatures: false, 
+        verifySignatures: false 
     });
     const base64Transaction = Buffer.from(serializedTransaction).toString('base64');
     console.log(`  Serialized Tx for relay (base64, first 32 chars): ${base64Transaction.substring(0,32)}...`);
@@ -694,30 +688,303 @@ async function buildPartialTransaction(skPrime, pkPrime, tag, cipherForChain) {
 
 // --- End Solana Transaction Helper ---
 
+// --- User Index Management --- 
+
+// Define the layout for CrushPda for client-side deserialization
+const CRUSH_PDA_LAYOUT = borsh.struct([
+    borsh.u8('bump'),
+    borsh.u8('filled'),
+    borsh.array(borsh.u8(), 48, 'cipher1'),
+    borsh.array(borsh.u8(), 48, 'cipher2'),
+]);
+
+// AES-GCM encryption for the index file
+// Key must be 16, 24, or 32 bytes for AES-128, AES-192, AES-256
+// kIndex is SHA256, so it's 32 bytes (AES-256)
+async function encryptIndex(indexObject, kIndex) {
+    if (kIndex.length !== 32) throw new Error("kIndex must be 32 bytes for AES-256-GCM.");
+    const plaintext = utf8ToBytes(JSON.stringify(indexObject));
+    const nonce = randomBytes(12); // 12 bytes (96 bits) is recommended for AES-GCM
+    const aes = aesGcm(kIndex, nonce); // noble/ciphers automatically selects AES mode based on key length
+    const ciphertext = await aes.encrypt(plaintext);
+    // Combine nonce and ciphertext for storage: nonce (12B) + ciphertext
+    const encryptedBlob = concatBytes(nonce, ciphertext);
+    return Buffer.from(encryptedBlob).toString('base64'); // Return as base64 string
+}
+
+async function decryptIndex(encryptedBase64, kIndex) {
+    if (kIndex.length !== 32) throw new Error("kIndex must be 32 bytes for AES-256-GCM.");
+    if (!encryptedBase64) return []; // No index stored yet, return empty array
+    
+    const encryptedBlob = Buffer.from(encryptedBase64, 'base64');
+    if (encryptedBlob.length < 12) throw new Error("Encrypted index blob too short to contain nonce.");
+
+    const nonce = encryptedBlob.slice(0, 12);
+    const ciphertext = encryptedBlob.slice(12);
+    
+    const aes = aesGcm(kIndex, nonce);
+    try {
+        const plaintext = await aes.decrypt(ciphertext);
+        return JSON.parse(bytesToUtf8(plaintext));
+    } catch (e) {
+        console.error("Failed to decrypt or parse index:", e);
+        throw new Error("Failed to decrypt index. It might be corrupted or using a different key.");
+    }
+}
+
+async function updateUserIndexOnApi(updatedIndexArray) {
+    if (!sessionKIndex || !sessionPublicKey) {
+        console.error("kIndex or sessionPublicKey not available for updating index.");
+        updateStatusMessage("Login session error, cannot update crush list.", true);
+        return false; // Indicate failure
+    }
+    updateStatusMessage("Syncing your updated crush list with server...");
+
+    try {
+        console.log("Encrypting updated index for server...");
+        const newEncryptedIndex = await encryptIndex(updatedIndexArray, sessionKIndex);
+
+        console.log(`PUTting updated index for ${sessionPublicKey}...`);
+        const putResponse = await fetch(`${API_ROOT}/api/user/${sessionPublicKey}`, {
+            method: 'PUT',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ encryptedIndex: newEncryptedIndex }),
+        });
+
+        if (!putResponse.ok) {
+            const errorData = await putResponse.json().catch(() => ({}));
+            console.error("Error updating user index on server:", putResponse.status, errorData);
+            throw new Error(`Failed to update user index on server: ${errorData.error || putResponse.statusText}`);
+        }
+
+        const putResult = await putResponse.json();
+        console.log("Successfully updated user index on server:", putResult);
+        updateStatusMessage("Your secret crush list synced with server!");
+        displayUserIndex(updatedIndexArray); // Display the list we just successfully saved
+        return true; // Indicate success
+
+    } catch (error) {
+        console.error("Error in updateUserIndexOnApi:", error);
+        updateStatusMessage(`Failed to sync crush list: ${error.message}`, true);
+        return false; // Indicate failure
+    }
+}
+
+async function loadAndDisplayUserIndex(displayStaleOnError = false) {
+    if (!sessionKIndex || !sessionPublicKey) {
+        console.warn("Cannot load user index: kIndex or publicKey not available.");
+        displayUserIndex([]); 
+        return;
+    }
+    updateStatusMessage("Loading your secret crushes & checking for mutuals...");
+    console.log(`Attempting to load index for wallet ${sessionPublicKey}...`);
+
+    let localDecryptedIndex = [];
+
+    try {
+        const response = await fetch(`${API_ROOT}/api/user/${sessionPublicKey}`);
+        if (response.ok) {
+            const data = await response.json();
+            if (data.encryptedIndex) {
+                console.log("Decrypting index from server...");
+                localDecryptedIndex = await decryptIndex(data.encryptedIndex, sessionKIndex);
+                updateStatusMessage("Crush list loaded from server.");
+            } else {
+                console.log("No encrypted index found on server for this user.");
+                updateStatusMessage("No crushes found on server. Ready to send one!");
+            }
+        } else if (response.status === 404) {
+             console.log("No index found for user (404 from server).");
+             updateStatusMessage("No crushes found yet. Send your first!");
+        } else {
+            const errorData = await response.json().catch(() => ({}));
+            console.error("Error fetching user index:", response.status, errorData);
+            throw new Error(`API error fetching index: ${errorData.error || response.statusText}`);
+        }
+    } catch (error) {
+        console.error("Failed to load or decrypt user index:", error);
+        updateStatusMessage(`Failed to load crush list: ${error.message}`, true);
+        if(displayStaleOnError) {
+            console.warn("Displaying potentially stale local data due to API error during load.");
+        }
+        displayUserIndex(localDecryptedIndex); // Display whatever we have (empty if error before fetch)
+        return; // Stop further processing if initial load fails badly
+    }
+
+    // Now, check status of pending crushes
+    let anIndexWasUpdated = false;
+    const connection = new Connection(SOLANA_RPC_URL, 'confirmed');
+
+    for (let i = 0; i < localDecryptedIndex.length; i++) {
+        const entry = localDecryptedIndex[i];
+        if (entry.status === "pending") {
+            console.log(`Checking status for pending crush with tag: ${entry.tag}`);
+            try {
+                const tagBytes = hexToBytes(entry.tag);
+                const pdaSeeds = [Buffer.from("crush"), Buffer.from(tagBytes)];
+                const [pdaPublicKey, _] = PublicKey.findProgramAddressSync(pdaSeeds, CRUSH_PROGRAM_ID);
+                
+                console.log(`  Fetching PDA: ${pdaPublicKey.toBase58()}`);
+                const accountInfo = await connection.getAccountInfo(pdaPublicKey);
+
+                if (accountInfo && accountInfo.data) {
+                    // Skip 8-byte discriminator for Anchor accounts
+                    const pdaData = CRUSH_PDA_LAYOUT.decode(accountInfo.data.slice(8));
+                    console.log(`  PDA data for ${entry.tag}: filled=${pdaData.filled}, bump=${pdaData.bump}`);
+
+                    if (pdaData.filled === 2) {
+                        console.log(`  MUTUAL MATCH FOUND for tag: ${entry.tag}!`);
+                        localDecryptedIndex[i].status = "mutual";
+                        anIndexWasUpdated = true;
+                        
+                        // Decrypt the *other* cipher to potentially display a note or confirm FIDs.
+                        if (entry.K_AB_hex) {
+                            const K_AB_bytes = hexToBytes(entry.K_AB_hex);
+                            const pdaCipher1_b64 = Buffer.from(pdaData.cipher1).toString('base64');
+                            // const pdaCipher2_b64 = Buffer.from(pdaData.cipher2).toString('base64'); // Not needed if only one other
+
+                            let otherCipherBytes;
+                            if (pdaCipher1_b64 === entry.cipherMine) {
+                                otherCipherBytes = pdaData.cipher2; // User's was cipher1, so other is cipher2
+                                console.log(`  User's cipher was cipher1, other party's is cipher2.`);
+                            } else {
+                                otherCipherBytes = pdaData.cipher1; // User's was cipher2 (or not found), so other is cipher1
+                                console.log(`  User's cipher was not cipher1 (or was cipher2), other party's is cipher1.`);
+                            }
+
+                            if (otherCipherBytes && otherCipherBytes.length === 48) {
+                                const nonce = otherCipherBytes.slice(0, 24);
+                                const encryptedDataWithAuthTag = otherCipherBytes.slice(24);
+                                try {
+                                    const cryptoInstance = xchacha20poly1305(K_AB_bytes, nonce);
+                                    const decryptedPayload = cryptoInstance.decrypt(encryptedDataWithAuthTag);
+                                    
+                                    // Payload is myFid (4 bytes) + targetFid (4 bytes)
+                                    if (decryptedPayload.length === 8) {
+                                        const view = new DataView(decryptedPayload.buffer, decryptedPayload.byteOffset, decryptedPayload.byteLength);
+                                        const theirFidInPayload = view.getUint32(0, true); // Assuming little-endian from original encryption
+                                        const myFidInPayload = view.getUint32(4, true);    // Assuming little-endian
+                                        
+                                        console.log(`  Successfully decrypted other party's payload! Their FID: ${theirFidInPayload}, My FID: ${myFidInPayload}`);
+                                        // Additional confirmation: check if myFidInPayload matches the current user's FID
+                                        // And if theirFidInPayload matches entry.targetFid
+                                        // This confirms integrity and correct key usage.
+                                        localDecryptedIndex[i].revealedInfo = `Mutual with FID ${theirFidInPayload} (you are ${myFidInPayload})`;
+                                    } else {
+                                        console.warn("  Decrypted payload from other party has unexpected length:", decryptedPayload.length);
+                                    }
+                                } catch (decryptionError) {
+                                    console.error(`  Failed to decrypt other party's cipher for tag ${entry.tag}:`, decryptionError);
+                                    localDecryptedIndex[i].revealedInfo = "Mutual (decryption issue)";
+                                }
+                            } else {
+                                console.warn(`  Could not identify or process other party's cipher for tag ${entry.tag}.`);
+                            }
+                        } else {
+                            console.warn(`  K_AB_hex missing for tag ${entry.tag}, cannot decrypt mutual payload.`);
+                            localDecryptedIndex[i].revealedInfo = "Mutual (key missing)";
+                        }
+
+                        const itemElement = document.querySelector(`[data-tag='${entry.tag}']`);
+                        if(itemElement) itemElement.style.backgroundColor = 'lightgreen'; 
+
+                    } else {
+                        console.log(`  PDA for tag ${entry.tag} is not filled (filled=${pdaData.filled}).`);
+                    }
+                } else {
+                    console.log(`  No account data found for PDA of tag: ${entry.tag}. It might not be initialized yet.`);
+                }
+            } catch (pdaError) {
+                console.error(`Error checking PDA for tag ${entry.tag}:`, pdaError);
+            }
+        }
+    }
+
+    displayUserIndex(localDecryptedIndex); // Display updated list (with any new mutuals)
+
+    if (anIndexWasUpdated) {
+        console.log("One or more crushes updated to mutual. Syncing with server...");
+        updateStatusMessage("Mutual match found! Updating list on server...");
+        await updateUserIndexOnApi(localDecryptedIndex); // Save the updated statuses to the server
+    } else {
+        updateStatusMessage("Crush list up to date.");
+    }
+}
+
+function displayUserIndex(indexArray) {
+    const placeholder = document.getElementById('userIndexContainerPlaceholder');
+    let indexContainer = document.getElementById('userIndexContainer');
+
+    if (!indexContainer && placeholder) {
+        indexContainer = document.createElement('div');
+        indexContainer.id = 'userIndexContainer';
+        indexContainer.style.marginTop = '20px';
+        placeholder.replaceWith(indexContainer); 
+    }
+    
+    if(indexContainer) {
+        indexContainer.innerHTML = '<h3>Your Secret Crushes:</h3>'; 
+
+        const list = document.createElement('ul');
+        list.style.listStyleType = "none";
+        list.style.paddingLeft = "0";
+
+        if (!indexArray || indexArray.length === 0) {
+            list.innerHTML = '<li><p>No crushes sent yet. Find someone!</p></li>';
+        } else {
+            indexArray.forEach(entry => {
+                const item = document.createElement('li');
+                item.setAttribute('data-tag', entry.tag); // For potential UI updates on mutual match
+                item.style.border = "1px solid #eee";
+                item.style.padding = "10px";
+                item.style.marginBottom = "8px";
+                item.style.borderRadius = "5px";
+                if (entry.status === "mutual") {
+                    item.style.backgroundColor = '#e6ffe6'; // Light green for mutual
+                }
+                
+                const tagHexSnippet = entry.tag ? entry.tag.substring(0,16) : 'N/A';
+                const cipherMineBase64Snippet = entry.cipherMine ? entry.cipherMine.substring(0,16) : 'N/A';
+                item.innerHTML = `
+                    <strong>Target FID:</strong> ${entry.targetFid || 'N/A'} <br>
+                    <strong>Target Username:</strong> @${entry.targetUsername || 'N/A'} <br>
+                    <strong>Status:</strong> ${entry.status || 'N/A'} ${entry.status === "mutual" ? `&#10024; <span class="mutual-info">${entry.revealedInfo || 'It\'s a Match!'}</span>` : ""} <br>
+                    <strong>Timestamp:</strong> ${entry.ts ? new Date(entry.ts).toLocaleString() : 'N/A'} <br>
+                    <small>Tag (hex): ${tagHexSnippet}...</small><br>
+                    <small>Your Cipher (b64): ${cipherMineBase64Snippet}...</small>
+                `;
+                list.appendChild(item);
+            });
+        }
+        indexContainer.appendChild(list);
+    } else {
+        console.error("Could not find or create userIndexContainer.");
+    }
+}
+
 async function handleSendCrush() {
     if (!selectedTargetUser || !selectedTargetUser.primary_sol_address) {
-        alert("No target user with a Solana address selected!");
+        updateStatusMessage("No target user with a Solana address selected!", true);
         return;
     }
-    if (!sessionKWallet) {
-        alert("kWallet not available. Please connect and sign first.");
+    if (!sessionKWallet || !sessionKIndex) { 
+        updateStatusMessage("kWallet or kIndex not available. Please connect and sign first.", true);
         return;
     }
-    // sessionPublicKey is also available if needed for other purposes, but not directly for this crypto flow.
-
+    
+    updateStatusMessage("Preparing your secret crush...");
     let myFid;
     try {
         const frameContext = await frame.sdk.context;
         if (!frameContext || typeof frameContext.user.fid !== 'number') {
-            console.error("Could not get user FID from frame context:", frameContext);
-            alert("Could not determine your Farcaster FID. Unable to send crush.");
-            return;
+            throw new Error("Could not get user FID from frame context.");
         }
         myFid = frameContext.user.fid;
-        console.log("User FID from frame context:", myFid);
     } catch (contextError) {
         console.error("Error getting frame context:", contextError);
-        alert("Error fetching your Farcaster details. Unable to send crush.");
+        updateStatusMessage("Error fetching your Farcaster details. Unable to send crush.", true);
         return;
     }
 
@@ -730,91 +997,94 @@ async function handleSendCrush() {
         }
     } catch(e) {
         console.error("Invalid target Solana address (edPubTarget):", edPubTarget, e);
-        alert("The target user\\'s Solana address appears invalid. Cannot proceed.");
+        updateStatusMessage("The target user\'s Solana address appears invalid.", true);
         return;
     }
 
-    console.log("Initiating crush sequence with:");
-    console.log("kWallet (first 8B hex):", bytesToHex(sessionKWallet.slice(0,8)));
-    console.log("edPubTarget (bs58):", edPubTarget);
-    console.log("edPubTarget (bytes, first 8B hex):", bytesToHex(edPubTargetBytes.slice(0,8)));
-    console.log("My FID:", myFid);
-    console.log("Target FID:", selectedTargetUser.fid);
-
-    const statusDiv = document.getElementById('searchResults'); 
-    const resultsDiv = statusDiv; // for clarity in event listener later
-    statusDiv.innerHTML = "<p>Processing your secret crush... Generating keys...</p>";
-    statusDiv.classList.add('populated');
-
+    const searchResultsDiv = document.getElementById('searchResults');
+    if(searchResultsDiv) searchResultsDiv.innerHTML = "<p>Processing your secret crush... Generating keys...</p>";
+    else updateStatusMessage("Processing your secret crush... Generating keys...");
+    
     try {
-        console.log("Step 1: Deriving stealth key...");
+        updateStatusMessage("Deriving stealth key...");
         const { skPrime, pkPrime } = await deriveStealthKey(sessionKWallet, edPubTargetBytes);
-        statusDiv.innerHTML = `<p>Processing... Stealth key derived.</p>`;
-        console.log(`  skPrime (hex): ${bytesToHex(skPrime)}, pkPrime (hex): ${bytesToHex(pkPrime)}`);
-
-        console.log("Step 2: Performing ECDH...");
+        updateStatusMessage("Performing ECDH for shared secret...");
         const sharedSecret = await performECDH(skPrime, edPubTargetBytes);
-        statusDiv.innerHTML = `<p>Processing... Shared secret calculated.</p>`;
-        console.log(`  Shared Secret (hex): ${bytesToHex(sharedSecret)}`);
-
-        console.log("Step 3: Deriving symmetric key and tag...");
+        updateStatusMessage("Deriving symmetric key and tag...");
         const { K_AB, tag } = await deriveSymmetricKeyAndTag(sharedSecret);
-        statusDiv.innerHTML = `<p>Processing... Symmetric key and tag generated.</p>`;
-        console.log(`  K_AB (hex): ${bytesToHex(K_AB)}, Tag (hex): ${bytesToHex(tag)}`);
-
-        console.log("Step 4: Encrypting payload...");
-        const note = "";
-        const cipherForChain = await encryptPayload(K_AB, myFid, selectedTargetUser.fid, note);
-        statusDiv.innerHTML = `<p>Processing... Payload encrypted.</p>`;
-        console.log(`  Cipher for chain (hex, length ${cipherForChain.length}): ${bytesToHex(cipherForChain)}`);
-
-        // Step 5: Partial Tx build
-        console.log("Step 5: Building partial transaction...");
+        updateStatusMessage("Encrypting payload...");
+        const cipherForChain = await encryptPayload(K_AB, myFid, selectedTargetUser.fid, "");
+        updateStatusMessage("Building partial transaction...");
         const base64Tx = await buildPartialTransaction(skPrime, pkPrime, tag, cipherForChain);
-        statusDiv.innerHTML = `<p>Processing... Partial transaction built.</p>`;
-        console.log(`  Base64 Encoded Tx for Relay: ${base64Tx.substring(0,64)}...`);
+        updateStatusMessage("Sending transaction to relay...");
+        const relayResponse = await fetch(`${API_ROOT}/relay`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', },
+            body: JSON.stringify({ tx: base64Tx }),
+        });
 
-        console.log("Step 6: Posting to relay (simulated)...");
-        statusDiv.innerHTML = `<p>Crush transaction ready for relay (simulated).</p>`;
-        console.log(`  Would POST to /relay with the serialized transaction.`);
+        if (!relayResponse.ok) {
+            const errorData = await relayResponse.json().catch(() => ({ message: 'Relay request failed with no JSON response.'}));
+            throw new Error(`Relay Error: ${errorData.message || relayResponse.statusText}`);
+        }
+        const relayResult = await relayResponse.json();
+        const finalTxSignature = relayResult.signature;
+        updateStatusMessage("Crush sent to relay! Transaction submitted.");
+        console.log(`  Relay successful! Final transaction signature: ${finalTxSignature}`);
+        
+        let currentIndexArray = [];
+        try {
+            const getResponse = await fetch(`${API_ROOT}/api/user/${sessionPublicKey}`);
+            if (getResponse.ok) {
+                const getData = await getResponse.json();
+                if (getData.encryptedIndex) {
+                    currentIndexArray = await decryptIndex(getData.encryptedIndex, sessionKIndex);
+                }
+            } else if (getResponse.status !== 404) { 
+                 console.warn("Error fetching user index before adding new crush, proceeding with empty list.");
+            }
+        } catch (fetchErr) {
+            console.warn("Network error fetching index before adding new crush, proceeding with empty list:", fetchErr);
+        }
 
-        setTimeout(() => {
-            statusDiv.innerHTML = `
+        const newCrushEntry = {
+            tag: bytesToHex(tag),
+            cipherMine: Buffer.from(cipherForChain).toString('base64'), 
+            status: "pending", 
+            ts: Date.now(),
+            targetFid: selectedTargetUser.fid,
+            targetUsername: selectedTargetUser.username,
+            K_AB_hex: bytesToHex(K_AB) 
+        };
+
+        const existingEntryIndex = currentIndexArray.findIndex(entry => entry.tag === newCrushEntry.tag);
+        if (existingEntryIndex > -1) currentIndexArray[existingEntryIndex] = newCrushEntry;
+        else currentIndexArray.push(newCrushEntry);
+        
+        const updateSuccess = await updateUserIndexOnApi(currentIndexArray);
+
+        if(searchResultsDiv) {
+            searchResultsDiv.innerHTML = `
                 <div style="padding: 15px;">
-                    <p style="color: green; font-weight: bold; font-size: 1.1em;">Simulated Crush Sent to ${selectedTargetUser.display_name}!</p>
-                    <p style="font-size: 0.9em; margin-top: 10px;">The cryptographic operations are complete. Check the debug console for detailed key information. The next steps involve building a real Solana transaction and sending it to the relay service.</p>
-                    <details style="margin-top: 15px; font-size: 0.8em; background: #f9f9f9; border: 1px solid #eee; padding: 8px; border-radius: 4px;">
-                        <summary>Debug: Derived Values (Click to expand)</summary>
-                        <ul style="list-style-type: disc; padding-left: 20px; word-break: break-all;">
-                            <li>Your FID: ${myFid}</li>
-                            <li>Target FID: ${selectedTargetUser.fid}</li>
-                            <li>Target Username: @${selectedTargetUser.username}</li>
-                            <li>kWallet (first 8B): ${bytesToHex(sessionKWallet.slice(0,8))}...</li>
-                            <li>edPubTarget (Solana Addr): ${edPubTarget}</li>
-                            <li>Stealth sk\' (private key, first 8B): ${bytesToHex(skPrime.slice(0,8))}...</li>
-                            <li>Stealth pk\' (public key, bs58): ${bs58.encode(pkPrime)}</li>
-                            <li>Shared Secret (first 8B): ${bytesToHex(sharedSecret.slice(0,8))}...</li>
-                            <li>Symmetric Key K_AB (first 8B): ${bytesToHex(K_AB.slice(0,8))}...</li>
-                            <li>Tag for Indexing (first 8B): ${bytesToHex(tag.slice(0,8))}...</li>
-                            <li>Cipher for Chain (112B, first 8B): ${bytesToHex(cipherForChain.slice(0,8))}...</li>
-                        </ul>
-                    </details>
+                    <p style="color: green; font-weight: bold; font-size: 1.1em;">Crush Sent to ${selectedTargetUser.display_name}!</p>
+                    <p style="font-size: 0.9em; margin-top: 10px;">Tx Signature: <a href="https://explorer.solana.com/tx/${finalTxSignature}?cluster=mainnet" target="_blank" rel="noopener noreferrer">${finalTxSignature.substring(0,10)}...</a></p>
+                    <p style="font-size: 0.8em; margin-top: 5px;">${updateSuccess ? "Your crush list has been updated on server." : "Failed to update crush list on server."}</p>
                     <button id="searchAgainAfterCrushBtn" style="margin-top: 15px;">Send Another Crush</button>
                 </div>
             `;
             document.getElementById('searchAgainAfterCrushBtn').addEventListener('click', () => {
                 document.getElementById('userSearchInput').value = '';
-                if(resultsDiv) {
-                    resultsDiv.innerHTML = ''; 
-                    resultsDiv.classList.remove('populated');
-                }
+                searchResultsDiv.innerHTML = ''; 
+                searchResultsDiv.classList.remove('populated');
                 selectedTargetUser = null; 
             });
-        }, 500);
+        } else {
+             updateStatusMessage("Crush sent! Tx: " + finalTxSignature.substring(0,10) + "...");
+        }
 
-    } catch (cryptoError) {
-        console.error("Error during crush sequence cryptography:", cryptoError);
-        statusDiv.innerHTML = `<p style="color: red; padding: 15px;">Crypto Error: ${cryptoError.message}. Check console for details.</p>`;
-        statusDiv.classList.add('populated');
+    } catch (error) {
+        console.error("Error during crush sequence (crypto or relay):", error);
+        updateStatusMessage(`Error: ${error.message}. Check console.`, true);
+        if(searchResultsDiv) searchResultsDiv.innerHTML = `<p style="color: red; padding: 15px;">Error: ${error.message}.</p>`;
     }
 }
