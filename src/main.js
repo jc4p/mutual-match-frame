@@ -487,7 +487,7 @@ function initializeApp() {
         appDiv.innerHTML = `
             <div id="statusMessage"><p>Ready.</p></div>
             <div id="content">
-                <h1>Welcome to Secret Mutual Crush!</h1>
+                <h3>Fully encrypted and private onchain crushes.</h3>
                 <p>Find out if your Farcaster crush is mutual, discreetly.</p>
                 <p>Click below to get started by connecting your wallet and signing a message to generate your app-specific keys.</p>
                 <button id="getStartedBtn">Get Started & Authenticate</button>
@@ -524,14 +524,14 @@ function populateHowItWorksModal() {
         const closeButton = modalContent.querySelector('#howItWorksCloseBtn');
         
         const contentHtml = `
-        <p>Secret Mutual Crush allows Farcaster users to discreetly signal interest in someone. If the interest is mutual, both users are notified. Otherwise, your secret is safe!</p>
+        <p>Mutual Match allows Farcaster users to discreetly signal interest in someone. If the interest is mutual, both users are notified. Otherwise, your secret is safe!</p>
 
         <h3>How It Works (Summary)</h3>
         <ul>
             <li>✍️ <strong>Sign In:</strong> You sign a message with your wallet – this keeps your main Farcaster account details separate and generates a special key for this app.</li>
             <li>🤫 <strong>Express a Crush:</strong> You pick someone you follow. The app uses clever cryptography to prepare your 'crush' message.</li>
             <li>🔒 <strong>Encryption Magic:</strong> Your choice is encrypted using keys that only you and your potential crush can generate if you <em>both</em> express interest. The server or anyone else can't read it.</li>
-            <li>🔗 <strong>OnChain (but private!):</strong> An encrypted piece of data is sent to the Solana blockchain. This data doesn't reveal who you are or who you crushed on.</li>
+            <li>🔗 <strong>Onchain (but private!):</strong> An encrypted piece of data is sent to the Solana blockchain. This data doesn't reveal who you are or who you crushed on.</li>
             <li>🎉 <strong>Mutual Match:</strong> If the person you crushed on also crushes on you using this app, the system detects a match! Both of you will be notified. Otherwise, your crush remains a secret.</li>
         </ul>
 
