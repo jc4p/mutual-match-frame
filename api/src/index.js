@@ -450,13 +450,61 @@ app.get('/api/user/:wallet/app-pubkey', async (c) => {
             return c.json({ error: 'User not found or app key not set.' }, 404);
         }
         const userData = JSON.parse(userDataString);
-        if (!userData.appPublicKeyHex) {
+        
+        // Support both old format (single key) and new format (multiple keys)
+        if (userData.appPublicKeyHex) {
+            // Old format - return the single key
+            return c.json({ appPublicKeyHex: userData.appPublicKeyHex });
+        } else if (userData.appPublicKeys && userData.appPublicKeys.length > 0) {
+            // New format - return the most recent key (last in array)
+            const latestKey = userData.appPublicKeys[userData.appPublicKeys.length - 1];
+            return c.json({ appPublicKeyHex: latestKey.publicKeyHex });
+        } else {
             return c.json({ error: 'App public key not set for this user.' }, 404);
         }
-        return c.json({ appPublicKeyHex: userData.appPublicKeyHex });
     } catch (error) {
         console.error(`Error getting app public key for ${walletAddress}:`, error);
         return c.json({ error: 'Failed to retrieve app public key.', details: error.message }, 500);
+    }
+});
+
+// New endpoint to get all app public keys for a user
+app.get('/api/user/:wallet/all-app-pubkeys', async (c) => {
+    const { USER_INDEX_KV } = c.env;
+    if (!USER_INDEX_KV) {
+        return c.json({ error: 'User index service not configured.' }, 500);
+    }
+    const walletAddress = c.req.param('wallet');
+    if (!walletAddress) {
+        return c.json({ error: 'Wallet address parameter is required.' }, 400);
+    }
+    try {
+        const userDataString = await USER_INDEX_KV.get(walletAddress);
+        if (userDataString === null) {
+            return c.json({ error: 'User not found.' }, 404);
+        }
+        const userData = JSON.parse(userDataString);
+        
+        const allKeys = [];
+        
+        // Include old format key if it exists
+        if (userData.appPublicKeyHex) {
+            allKeys.push({
+                publicKeyHex: userData.appPublicKeyHex,
+                version: 'v1',
+                createdAt: userData.appPublicKeyCreatedAt || null
+            });
+        }
+        
+        // Include new format keys
+        if (userData.appPublicKeys && Array.isArray(userData.appPublicKeys)) {
+            allKeys.push(...userData.appPublicKeys);
+        }
+        
+        return c.json({ appPublicKeys: allKeys });
+    } catch (error) {
+        console.error(`Error getting all app public keys for ${walletAddress}:`, error);
+        return c.json({ error: 'Failed to retrieve app public keys.', details: error.message }, 500);
     }
 });
 
@@ -480,7 +528,7 @@ app.put('/api/user/:wallet', async (c) => {
         return c.json({ error: 'Invalid JSON request body.' }, 400);
     }
 
-    const { encryptedIndex, appPublicKeyHex } = requestBody;
+    const { encryptedIndex, appPublicKeyHex, appKeyVersion } = requestBody;
 
     // Validate inputs: encryptedIndex can be null if only updating appPublicKeyHex,
     // and appPublicKeyHex can be null if only updating encryptedIndex.
@@ -518,16 +566,48 @@ app.put('/api/user/:wallet', async (c) => {
             }
         }
         
+        // Migrate old format to new format if needed
+        if (existingData.appPublicKeyHex && !existingData.appPublicKeys) {
+            console.log(`PUT /api/user/${walletAddress}: Migrating from old key format to new format`);
+            existingData.appPublicKeys = [{
+                publicKeyHex: existingData.appPublicKeyHex,
+                version: 'v1',
+                createdAt: existingData.appPublicKeyCreatedAt || new Date().toISOString()
+            }];
+            // Don't delete the old field yet for backwards compatibility
+        }
+        
         // Update fields if provided in the request
         const dataToStore = { ...existingData };
+        
         if (encryptedIndex !== undefined) { // Allows explicit null to clear
             dataToStore.encryptedIndex = encryptedIndex;
         }
-        if (appPublicKeyHex !== undefined) { // Allows explicit null to clear
-            dataToStore.appPublicKeyHex = appPublicKeyHex;
+        
+        if (appPublicKeyHex !== undefined && appPublicKeyHex !== null) {
+            // Initialize appPublicKeys array if it doesn't exist
+            if (!dataToStore.appPublicKeys) {
+                dataToStore.appPublicKeys = [];
+            }
+            
+            // Check if this key already exists
+            const keyExists = dataToStore.appPublicKeys.some(key => key.publicKeyHex === appPublicKeyHex);
+            
+            if (!keyExists) {
+                // Add new key with version info
+                dataToStore.appPublicKeys.push({
+                    publicKeyHex: appPublicKeyHex,
+                    version: appKeyVersion || 'v2', // Default to v2 for new keys
+                    createdAt: new Date().toISOString()
+                });
+                
+                // Also update the legacy field for backwards compatibility
+                dataToStore.appPublicKeyHex = appPublicKeyHex;
+                dataToStore.appPublicKeyCreatedAt = new Date().toISOString();
+            }
         }
 
-        console.log(`PUT /api/user/${walletAddress}: Storing user data:`, JSON.stringify(dataToStore));
+        console.log(`PUT /api/user/${walletAddress}: Storing user data with ${dataToStore.appPublicKeys ? dataToStore.appPublicKeys.length : 0} app keys`);
         await USER_INDEX_KV.put(walletAddress, JSON.stringify(dataToStore));
         console.log(`PUT /api/user/${walletAddress}: User data stored successfully.`);
         return c.json({ success: true, message: 'User data updated.' });

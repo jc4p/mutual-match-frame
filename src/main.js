@@ -193,6 +193,11 @@ let sessionAppPublicKeyHex = null; // Hex string of the app-specific public key 
 let selectedTargetUser = null; // To store { fid, username, display_name, pfp_url, primary_sol_address }
 let relayerPublicKeyString = null; // Variable to store relayer's public key
 
+// --- NEW: Store multiple key versions for migration support ---
+let sessionKeyVersions = []; // Array of {kWallet, kIndex, appPublicKeyHex, version, createdAt}
+let currentKeyVersion = 'v2'; // Update this when wallet provider changes
+// --- End NEW ---
+
 // --- New global variables for provider and connected public key ---
 let solanaProviderInstance = null;
 let userPublicKeyString = null; // Stores public key from wallet connection, before signing
@@ -277,33 +282,58 @@ async function searchUsers(query) {
 
                     try {
                         console.log(`Fetching app key for target user: ${primarySolAddress} (@${username})`);
-                        const appKeyResponse = await fetch(`${API_ROOT}/api/user/${primarySolAddress}/app-pubkey`);
                         
+                        // --- NEW: Try to fetch all app keys for the target user ---
                         let targetUserAppPublicKeyHex = null;
                         let targetUserAppPublicKeyBytes = null;
+                        let targetUserAllAppKeys = [];
+                        
+                        // First try to get all keys
+                        const allKeysResponse = await fetch(`${API_ROOT}/api/user/${primarySolAddress}/all-app-pubkeys`);
+                        if (allKeysResponse.ok) {
+                            const allKeysData = await allKeysResponse.json();
+                            if (allKeysData.appPublicKeys && allKeysData.appPublicKeys.length > 0) {
+                                targetUserAllAppKeys = allKeysData.appPublicKeys;
+                                // Use the most recent key as primary
+                                const latestKey = allKeysData.appPublicKeys[allKeysData.appPublicKeys.length - 1];
+                                targetUserAppPublicKeyHex = latestKey.publicKeyHex;
+                                targetUserAppPublicKeyBytes = hexToBytes(targetUserAppPublicKeyHex);
+                                console.log(`Fetched ${targetUserAllAppKeys.length} app keys for @${username}`);
+                            }
+                        } else {
+                            // Fallback to single key endpoint
+                            const appKeyResponse = await fetch(`${API_ROOT}/api/user/${primarySolAddress}/app-pubkey`);
+                            
+                            if (!appKeyResponse.ok) {
+                                if (appKeyResponse.status === 404) {
+                                    resultsDiv.innerHTML = `
+                                        <p>Selected: <strong>${displayName}</strong> (@${username})</p>
+                                        <p style="color: orange;">${displayName} needs to open this app and sign-in at least once. Gently nudge them to!</p>
+                                        <p><button id="searchAgainBtn">Search Again</button></p>
+                                    `;
+                                    document.getElementById('searchAgainBtn').addEventListener('click', () => {
+                                        document.getElementById('userSearchInput').value = '';
+                                        resultsDiv.innerHTML = '';
+                                        resultsDiv.classList.remove('populated');
+                                    });
+                                    selectedTargetUser = null; // Clear selection
+                                    return;
+                                } else {
+                                    const errData = await appKeyResponse.json().catch(() => ({}));
+                                    throw new Error(`API Error (${appKeyResponse.status}): ${errData.error || appKeyResponse.statusText}`);
+                                }
+                            }
 
-                        if (!appKeyResponse.ok) {
-                            if (appKeyResponse.status === 404) {
-                                resultsDiv.innerHTML = `
-                                    <p>Selected: <strong>${displayName}</strong> (@${username})</p>
-                                    <p style="color: orange;">${displayName} needs to open this app and sign-in at least once. Gently nudge them to!</p>
-                                    <p><button id="searchAgainBtn">Search Again</button></p>
-                                `;
-                                document.getElementById('searchAgainBtn').addEventListener('click', () => {
-                                    document.getElementById('userSearchInput').value = '';
-                                    resultsDiv.innerHTML = '';
-                                    resultsDiv.classList.remove('populated');
-                                });
-                                selectedTargetUser = null; // Clear selection
-                                return;
-                            } else {
-                                const errData = await appKeyResponse.json().catch(() => ({}));
-                                throw new Error(`API Error (${appKeyResponse.status}): ${errData.error || appKeyResponse.statusText}`);
+                            const appKeyData = await appKeyResponse.json();
+                            targetUserAppPublicKeyHex = appKeyData.appPublicKeyHex;
+                            if (targetUserAppPublicKeyHex) {
+                                targetUserAllAppKeys = [{
+                                    publicKeyHex: targetUserAppPublicKeyHex,
+                                    version: 'unknown'
+                                }];
                             }
                         }
-
-                        const appKeyData = await appKeyResponse.json();
-                        targetUserAppPublicKeyHex = appKeyData.appPublicKeyHex;
+                        // --- End NEW ---
 
                         if (!targetUserAppPublicKeyHex) {
                             resultsDiv.innerHTML = `
@@ -334,7 +364,8 @@ async function searchUsers(query) {
                             pfp_url: item.dataset.pfpurl,
                             primary_sol_address: primarySolAddress,
                             appPublicKeyHex: targetUserAppPublicKeyHex, // Store fetched key
-                            appPublicKeyBytes: targetUserAppPublicKeyBytes // Store fetched key bytes
+                            appPublicKeyBytes: targetUserAppPublicKeyBytes, // Store fetched key bytes
+                            allAppKeys: targetUserAllAppKeys // NEW: Store all keys for potential future use
                         };
                         console.log("Selected target user (with app key):", selectedTargetUser);
                         resultsDiv.innerHTML = `
@@ -488,8 +519,63 @@ async function performSignatureAndSetup(provider, publicKeyStrToSignWith) {
 
         // Store session data in localStorage
         try {
+            // --- NEW: Before storing new keys, backup current ones if they're different ---
+            const existingKWalletHex = localStorage.getItem('sessionKWalletHex');
+            if (existingKWalletHex && existingKWalletHex !== bytesToHex(sessionKWallet)) {
+                // Keys are changing! Backup the old ones
+                console.log("Detected key change, backing up previous session...");
+                localStorage.setItem('sessionKWalletHex.backup', existingKWalletHex);
+                localStorage.setItem('sessionPublicKeyString.backup', localStorage.getItem('sessionPublicKeyString') || '');
+                localStorage.setItem('backupCreatedAt', new Date().toISOString());
+            }
+            // --- End NEW ---
+            
+            // Store current key
             localStorage.setItem('sessionKWalletHex', bytesToHex(sessionKWallet));
             localStorage.setItem('sessionPublicKeyString', sessionPublicKey);
+            
+            // --- NEW: Store multiple key versions ---
+            const currentKeyData = {
+                kWalletHex: bytesToHex(sessionKWallet),
+                kIndexHex: bytesToHex(sessionKIndex),
+                appPublicKeyHex: sessionAppPublicKeyHex,
+                version: currentKeyVersion,
+                createdAt: new Date().toISOString()
+            };
+            
+            // Load existing key versions
+            const existingKeyVersionsStr = localStorage.getItem('sessionKeyVersions');
+            let existingKeyVersions = [];
+            if (existingKeyVersionsStr) {
+                try {
+                    existingKeyVersions = JSON.parse(existingKeyVersionsStr);
+                } catch (e) {
+                    console.error("Error parsing existing key versions:", e);
+                    existingKeyVersions = [];
+                }
+            }
+            
+            // Check if this key already exists
+            const keyExists = existingKeyVersions.some(k => k.appPublicKeyHex === sessionAppPublicKeyHex);
+            if (!keyExists) {
+                existingKeyVersions.push(currentKeyData);
+                // Keep only the last 5 keys to avoid unbounded growth
+                if (existingKeyVersions.length > 5) {
+                    existingKeyVersions = existingKeyVersions.slice(-5);
+                }
+                localStorage.setItem('sessionKeyVersions', JSON.stringify(existingKeyVersions));
+            }
+            
+            // Update in-memory array
+            sessionKeyVersions = existingKeyVersions.map(k => ({
+                kWallet: hexToBytes(k.kWalletHex),
+                kIndex: hexToBytes(k.kIndexHex),
+                appPublicKeyHex: k.appPublicKeyHex,
+                version: k.version,
+                createdAt: k.createdAt
+            }));
+            // --- End NEW ---
+            
             console.log("Session keys stored in localStorage.");
         } catch (e) {
             console.error("Error saving session keys to localStorage:", e);
@@ -526,7 +612,7 @@ async function performSignatureAndSetup(provider, publicKeyStrToSignWith) {
         // We'll use a combined function to update index and app key.
         console.log("Attempting to register app public key with server...");
         const initialIndexData = await getDecryptedUserIndexFromServer(); // Get current index, or empty array
-        await updateUserIndexAndAppKeyOnApi(initialIndexData, sessionAppPublicKeyHex);
+        await updateUserIndexAndAppKeyOnApi(initialIndexData, sessionAppPublicKeyHex, currentKeyVersion); // Pass version
 
         return { kWallet: sessionKWallet, publicKey: sessionPublicKey, kIndex: sessionKIndex, appPublicKeyHex: sessionAppPublicKeyHex };
 
@@ -735,6 +821,7 @@ function handleSignOut() {
     try {
         localStorage.removeItem('sessionKWalletHex');
         localStorage.removeItem('sessionPublicKeyString');
+        localStorage.removeItem('sessionKeyVersions'); // NEW: Remove key versions too
         // Optionally, clear other session-related variables if they are not reset by page load
         sessionKWallet = null;
         sessionPublicKey = null;
@@ -742,6 +829,7 @@ function handleSignOut() {
         sessionAppPublicKeyHex = null;
         userPublicKeyString = null;
         selectedTargetUser = null;
+        sessionKeyVersions = []; // NEW: Clear key versions
         // No need to clear solanaProviderInstance if it's managed by the SDK and might be reused.
     } catch (e) {
         console.error("Error clearing localStorage during sign out:", e);
@@ -781,6 +869,51 @@ document.addEventListener('DOMContentLoaded', async () => {
                 sessionKIndex = sha256(concatBytes(hotPrefix, sessionKWallet));
                 const appSpecificPublicKeyBytes = ed25519.getPublicKey(sessionKWallet);
                 sessionAppPublicKeyHex = bytesToHex(appSpecificPublicKeyBytes);
+
+                // --- NEW: Load all key versions from localStorage ---
+                const storedKeyVersionsStr = localStorage.getItem('sessionKeyVersions');
+                if (storedKeyVersionsStr) {
+                    try {
+                        const storedKeyVersions = JSON.parse(storedKeyVersionsStr);
+                        sessionKeyVersions = storedKeyVersions.map(k => ({
+                            kWallet: hexToBytes(k.kWalletHex),
+                            kIndex: hexToBytes(k.kIndexHex),
+                            appPublicKeyHex: k.appPublicKeyHex,
+                            version: k.version,
+                            createdAt: k.createdAt
+                        }));
+                        console.log(`Loaded ${sessionKeyVersions.length} key versions from localStorage`);
+                    } catch (e) {
+                        console.error("Error loading key versions from localStorage:", e);
+                        sessionKeyVersions = [];
+                    }
+                }
+                
+                // --- NEW: Also try to recover from backup if available ---
+                const backupKWalletHex = localStorage.getItem('sessionKWalletHex.backup');
+                if (backupKWalletHex) {
+                    try {
+                        const backupKWallet = hexToBytes(backupKWalletHex);
+                        const backupKIndex = sha256(concatBytes(utf8ToBytes("HOT"), backupKWallet));
+                        const backupAppPublicKeyHex = bytesToHex(ed25519.getPublicKey(backupKWallet));
+                        
+                        // Add to sessionKeyVersions if not already there
+                        const backupExists = sessionKeyVersions.some(k => k.appPublicKeyHex === backupAppPublicKeyHex);
+                        if (!backupExists) {
+                            sessionKeyVersions.unshift({ // Add at beginning since it's older
+                                kWallet: backupKWallet,
+                                kIndex: backupKIndex,
+                                appPublicKeyHex: backupAppPublicKeyHex,
+                                version: 'v1-backup',
+                                createdAt: localStorage.getItem('backupCreatedAt') || new Date(Date.now() - 86400000).toISOString()
+                            });
+                            console.log("Loaded backup session key");
+                        }
+                    } catch (e) {
+                        console.error("Error loading backup session:", e);
+                    }
+                }
+                // --- End NEW ---
 
                 console.log('Restored kWallet (hex, first 8 bytes):', bytesToHex(sessionKWallet.slice(0,8)));
                 console.log('Restored sessionPublicKey:', sessionPublicKey);
@@ -1128,13 +1261,38 @@ async function decryptIndex(encryptedBase64, kIndex) {
     const nonce = encryptedBlob.slice(0, 12);
     const ciphertext = encryptedBlob.slice(12);
     
+    // Try with current kIndex first
     const aes = gcm(kIndex, nonce);
     try {
         const plaintext = await aes.decrypt(ciphertext);
         return JSON.parse(bytesToUtf8(plaintext));
     } catch (e) {
-        console.error("Failed to decrypt or parse index:", e);
-        throw new Error("Failed to decrypt index. It might be corrupted or using a different key.");
+        console.log("Failed to decrypt index with current kIndex, trying historical keys...");
+        
+        // Try with historical kIndex values
+        for (const keyVersion of sessionKeyVersions) {
+            if (bytesToHex(keyVersion.kIndex) === bytesToHex(kIndex)) {
+                continue; // Skip current key, we already tried it
+            }
+            
+            try {
+                const historicalAes = gcm(keyVersion.kIndex, nonce);
+                const plaintext = await historicalAes.decrypt(ciphertext);
+                const decryptedData = JSON.parse(bytesToUtf8(plaintext));
+                
+                console.log(`Successfully decrypted index with historical key version ${keyVersion.version}. Migrating to current key...`);
+                
+                // Re-encrypt with current kIndex and save
+                await updateUserIndexOnApi(decryptedData);
+                
+                return decryptedData;
+            } catch (historicalError) {
+                // This historical key didn't work, try next
+            }
+        }
+        
+        console.error("Failed to decrypt index with any available keys:", e);
+        throw new Error("Failed to decrypt index. It might be corrupted or you may need to recover your old session keys.");
     }
 }
 
@@ -1166,7 +1324,7 @@ async function getDecryptedUserIndexFromServer() {
 }
 
 // Modified function to update index AND app public key
-async function updateUserIndexAndAppKeyOnApi(indexArrayToSave, appPublicKeyHexToSend) {
+async function updateUserIndexAndAppKeyOnApi(indexArrayToSave, appPublicKeyHexToSend, version = null) {
     if (!sessionKIndex || !sessionPublicKey) {
         console.error("kIndex or sessionPublicKey not available for updating user data.");
         updateStatusMessage("Login session error, cannot sync data.", true);
@@ -1187,6 +1345,9 @@ async function updateUserIndexAndAppKeyOnApi(indexArrayToSave, appPublicKeyHexTo
         }
         if (appPublicKeyHexToSend !== null) { // Allow sending just app key, or just index, or both
             payload.appPublicKeyHex = appPublicKeyHexToSend;
+            if (version !== null) {
+                payload.appKeyVersion = version; // NEW: Include version if provided
+            }
         }
 
         if (Object.keys(payload).length === 0) {
@@ -1227,7 +1388,7 @@ async function updateUserIndexAndAppKeyOnApi(indexArrayToSave, appPublicKeyHexTo
 // Keep old updateUserIndexOnApi for calls that ONLY update the index (like after a crush status change)
 // but it should now call the new combined function, passing null for appPublicKeyHex
 async function updateUserIndexOnApi(updatedIndexArray) {
-    return await updateUserIndexAndAppKeyOnApi(updatedIndexArray, null); // Pass null for appPublicKeyHex
+    return await updateUserIndexAndAppKeyOnApi(updatedIndexArray, null, null); // Pass null for appPublicKeyHex and version
 }
 
 async function loadAndDisplayUserIndex(displayStaleOnError = false) {
@@ -1344,11 +1505,61 @@ async function loadAndDisplayUserIndex(displayStaleOnError = false) {
                                 const nonce = otherCipherForDecryption.slice(0, 24);
                                 const encryptedDataWithAuthTag = otherCipherForDecryption.slice(24);
                                 
+                                // --- NEW: Try decrypting with multiple keys ---
+                                let decryptionSuccessful = false;
+                                let decryptedPayload = null;
+                                let usedKeyVersion = 'current';
+                                
+                                // First try with current key
                                 try {
-                                    const cryptoInstance = xchacha20poly1305(K_common_bytes, nonce); // Use K_common_bytes
-                                    const decryptedPayload = cryptoInstance.decrypt(encryptedDataWithAuthTag);
+                                    const cryptoInstance = xchacha20poly1305(K_common_bytes, nonce);
+                                    decryptedPayload = cryptoInstance.decrypt(encryptedDataWithAuthTag);
+                                    decryptionSuccessful = true;
+                                    console.log(`  Successfully decrypted with current key`);
+                                } catch (currentKeyError) {
+                                    console.log(`  Failed to decrypt with current key, trying historical keys...`);
                                     
-                                    console.log(`  MUTUAL MATCH FOUND & DECRYPTED for symmetric tag: ${entry.symmetricTag}!`);
+                                    // Try with all stored key versions
+                                    for (const keyVersion of sessionKeyVersions) {
+                                        if (keyVersion.appPublicKeyHex === sessionAppPublicKeyHex) {
+                                            continue; // Skip current key, we already tried it
+                                        }
+                                        
+                                        try {
+                                            // Fetch target user's historical keys
+                                            const targetAllKeysResponse = await fetch(`${API_ROOT}/api/user/${entry.targetUserSolAddress || selectedTargetUser?.primary_sol_address}/all-app-pubkeys`);
+                                            if (!targetAllKeysResponse.ok) continue;
+                                            
+                                            const targetAllKeysData = await targetAllKeysResponse.json();
+                                            if (!targetAllKeysData.appPublicKeys) continue;
+                                            
+                                            // Try each combination of our historical keys with their historical keys
+                                            for (const targetKey of targetAllKeysData.appPublicKeys) {
+                                                try {
+                                                    const targetKeyBytes = hexToBytes(targetKey.publicKeyHex);
+                                                    const historicalSharedSecret = await generateSymmetricSharedSecret(keyVersion.kWallet, targetKeyBytes);
+                                                    const { symmetricEncryptionKey: historicalK } = await deriveSymmetricKeysFromSharedSecret(historicalSharedSecret);
+                                                    
+                                                    const historicalCrypto = xchacha20poly1305(historicalK, nonce);
+                                                    decryptedPayload = historicalCrypto.decrypt(encryptedDataWithAuthTag);
+                                                    decryptionSuccessful = true;
+                                                    usedKeyVersion = `${keyVersion.version}+${targetKey.version}`;
+                                                    console.log(`  Successfully decrypted with historical keys: our ${keyVersion.version} + their ${targetKey.version}`);
+                                                    break;
+                                                } catch (e) {
+                                                    // This combination didn't work, try next
+                                                }
+                                            }
+                                            if (decryptionSuccessful) break;
+                                        } catch (fetchError) {
+                                            console.warn(`  Could not fetch historical keys for target user: ${fetchError.message}`);
+                                        }
+                                    }
+                                }
+                                // --- End NEW ---
+                                
+                                if (decryptionSuccessful && decryptedPayload) {
+                                    console.log(`  MUTUAL MATCH FOUND & DECRYPTED for symmetric tag: ${entry.symmetricTag}! (Key version: ${usedKeyVersion})`);
                                     localDecryptedIndex[i].status = "mutual"; // Set status to full mutual
                                     anIndexWasUpdated = true;
 
@@ -1363,10 +1574,10 @@ async function loadAndDisplayUserIndex(displayStaleOnError = false) {
                                         console.warn("  Decrypted payload from other party has unexpected length:", decryptedPayload.length);
                                         localDecryptedIndex[i].revealedInfo = "Mutual (Payload Format Error)";
                                     }
-                                } catch (decryptionError) {
-                                    console.error(`  Failed to decrypt other party's cipher for symmetric tag ${entry.symmetricTag}:`, decryptionError);
+                                } else {
+                                    console.error(`  Failed to decrypt other party's cipher for symmetric tag ${entry.symmetricTag} with any available keys`);
                                     localDecryptedIndex[i].status = "mutual_decryption_failed"; // Special status
-                                    localDecryptedIndex[i].revealedInfo = "Mutual (Decryption Error)";
+                                    localDecryptedIndex[i].revealedInfo = "Mutual (Decryption Error - Try Re-authenticating)";
                                     anIndexWasUpdated = true; 
                                 }
                             } else if (otherCipherBytes_raw === null && localDecryptedIndex[i].status !== "mutual_decryption_key_mismatch") {
@@ -1775,6 +1986,7 @@ async function handleSendCrush() {
                 targetFid: selectedTargetUser.fid,
                 targetUsername: selectedTargetUser.username,
                 targetPfpUrl: selectedTargetUser.pfp_url, // Store PFP URL
+                targetUserSolAddress: selectedTargetUser.primary_sol_address, // NEW: Store target's SOL address for key lookups
                 symmetricKeyHex: bytesToHex(symmetricEncryptionKey), // Changed from K_AB_hex and stores K_common
                 txSignature: finalTxSignature, 
                 confirmationError: confirmationErrorDetail,
@@ -1787,7 +1999,7 @@ async function handleSendCrush() {
             else currentIndexArray.push(newCrushEntry);
             
             // Use the combined function to update index (and ensure app key is still there or updated if changed)
-            const updateSuccess = await updateUserIndexAndAppKeyOnApi(currentIndexArray, sessionAppPublicKeyHex);
+            const updateSuccess = await updateUserIndexAndAppKeyOnApi(currentIndexArray, sessionAppPublicKeyHex, currentKeyVersion);
     
             if(searchResultsDiv) {
                 let finalUiColor = 'green';
@@ -1821,5 +2033,34 @@ async function handleSendCrush() {
         console.error("Error during crush sequence (crypto or relay):", error);
         updateStatusMessage(`Error: ${error.message}. Check console.`, true);
         if(searchResultsDiv) searchResultsDiv.innerHTML = `<p style="color: red; padding: 15px;">Error: ${error.message}.</p>`;
+    }
+}
+
+// New helper function to recover from old sessions
+async function tryRecoverOldSession() {
+    const oldKWalletHex = localStorage.getItem('sessionKWalletHex.v1'); // Assuming we version these
+    if (oldKWalletHex) {
+        try {
+            const oldKWallet = hexToBytes(oldKWalletHex);
+            const hotPrefix = utf8ToBytes("HOT");
+            const oldKIndex = sha256(concatBytes(hotPrefix, oldKWallet));
+            const oldAppPublicKeyBytes = ed25519.getPublicKey(oldKWallet);
+            const oldAppPublicKeyHex = bytesToHex(oldAppPublicKeyBytes);
+            
+            // Add to sessionKeyVersions if not already there
+            const exists = sessionKeyVersions.some(k => k.appPublicKeyHex === oldAppPublicKeyHex);
+            if (!exists) {
+                sessionKeyVersions.push({
+                    kWallet: oldKWallet,
+                    kIndex: oldKIndex,
+                    appPublicKeyHex: oldAppPublicKeyHex,
+                    version: 'v1',
+                    createdAt: new Date(Date.now() - 86400000).toISOString() // Assume 1 day old
+                });
+                console.log("Recovered old session key from localStorage");
+            }
+        } catch (e) {
+            console.error("Error recovering old session:", e);
+        }
     }
 }
