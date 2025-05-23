@@ -1880,6 +1880,87 @@ async function handleSendCrush() {
 
         if (!relayResponse.ok) {
             const errorData = await relayResponse.json().catch(() => ({ message: 'Relay request failed with no JSON response.'}));
+            
+            // --- NEW: Check for AlreadyMutual error ---
+            if (errorData.error && errorData.simulationLogs) {
+                const isAlreadyMutual = errorData.simulationLogs.some(log => 
+                    log.includes('AlreadyMutual') || 
+                    log.includes('This crush has already been reciprocated and is mutual')
+                );
+                
+                if (isAlreadyMutual) {
+                    console.log("Detected AlreadyMutual error - this is actually a recovered mutual match!");
+                    updateStatusMessage("Great news! This is already a mutual match! Updating your list...");
+                    
+                    // Create a mutual match entry
+                    let currentIndexArray = await getDecryptedUserIndexFromServer();
+                    
+                    const recoveredMutualEntry = {
+                        symmetricTag: bytesToHex(symmetricTag),
+                        cipherMine: Buffer.from(cipherForChain).toString('base64'),
+                        status: "mutual", // Mark as mutual
+                        ts: Date.now(),
+                        targetFid: selectedTargetUser.fid,
+                        targetUsername: selectedTargetUser.username,
+                        targetPfpUrl: selectedTargetUser.pfp_url,
+                        targetUserSolAddress: selectedTargetUser.primary_sol_address,
+                        symmetricKeyHex: bytesToHex(symmetricEncryptionKey),
+                        txSignature: null, // No successful tx since it was already there
+                        confirmationError: null,
+                        targetUserAppPublicKeyHex: targetUserAppPublicKeyHex,
+                        revealedInfo: `Mutual with FID ${selectedTargetUser.fid}`,
+                        recoveredFromError: true // Flag to indicate this was recovered
+                    };
+                    
+                    // Check if this entry already exists (by symmetricTag)
+                    const existingEntryIndex = currentIndexArray.findIndex(entry => entry.symmetricTag === recoveredMutualEntry.symmetricTag);
+                    if (existingEntryIndex > -1) {
+                        // Update existing entry to mutual
+                        currentIndexArray[existingEntryIndex] = { ...currentIndexArray[existingEntryIndex], ...recoveredMutualEntry };
+                    } else {
+                        // Add new entry
+                        currentIndexArray.push(recoveredMutualEntry);
+                    }
+                    
+                    // Save updated index
+                    await updateUserIndexAndAppKeyOnApi(currentIndexArray, sessionAppPublicKeyHex, currentKeyVersion);
+                    
+                    // Update UI
+                    if (searchResultsDiv) {
+                        searchResultsDiv.innerHTML = `
+                            <div style="padding: 15px; background-color: #e6ffe6; border: 2px solid #5cb85c; border-radius: 5px;">
+                                <p style="color: #5cb85c; font-weight: bold; font-size: 1.2em;">🎉 Recovered Mutual Match!</p>
+                                <p style="margin: 10px 0;"><strong>${selectedTargetUser.display_name}</strong> (@${selectedTargetUser.username}) had already crushed on you!</p>
+                                <p style="font-size: 0.9em; color: #666;">This mutual match was recovered from the blockchain.</p>
+                                <button id="viewRecoveredProfileBtn" class="view-profile-btn" data-fid="${selectedTargetUser.fid}" style="margin-top: 10px; margin-right: 10px;">View Profile</button>
+                                <button id="searchAgainAfterRecoveryBtn" style="margin-top: 10px;">Send Another Crush</button>
+                            </div>
+                        `;
+                        
+                        document.getElementById('viewRecoveredProfileBtn')?.addEventListener('click', async () => {
+                            try {
+                                await frame.sdk.actions.viewProfile({ fid: selectedTargetUser.fid });
+                            } catch (e) {
+                                console.error("Error viewing profile:", e);
+                            }
+                        });
+                        
+                        document.getElementById('searchAgainAfterRecoveryBtn')?.addEventListener('click', () => {
+                            document.getElementById('userSearchInput').value = '';
+                            searchResultsDiv.innerHTML = '';
+                            searchResultsDiv.classList.remove('populated');
+                            selectedTargetUser = null;
+                        });
+                    }
+                    
+                    // Reload the display to show the new mutual match
+                    await loadAndDisplayUserIndex();
+                    
+                    return; // Exit early - we've handled this case
+                }
+            }
+            // --- End NEW ---
+            
             throw new Error(`Relay Error: ${errorData.message || relayResponse.statusText}`);
         }
         const relayResult = await relayResponse.json();
