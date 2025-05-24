@@ -1460,151 +1460,235 @@ async function loadAndDisplayUserIndex(displayStaleOnError = false) {
                 console.warn(`Skipping check for entry to FID ${entry.targetFid} because symmetricTag is missing (old entry format?).`);
                 continue;
             }
-            console.log(`Checking status for pending crush with SYMMETRIC tag: ${entry.symmetricTag}`);
-            try {
-                const symmetricTagBytes = hexToBytes(entry.symmetricTag);
-                const pdaSeeds = [Buffer.from("crush"), Buffer.from(symmetricTagBytes)];
-                const [pdaPublicKey, _] = PublicKey.findProgramAddressSync(pdaSeeds, CRUSH_PROGRAM_ID);
-                
-                console.log(`  Fetching PDA (derived from symmetric tag): ${pdaPublicKey.toBase58()}`);
-                const accountInfo = await connection.getAccountInfo(pdaPublicKey);
-
-                if (accountInfo && accountInfo.data) {
-                    // Skip 8-byte discriminator for Anchor accounts
-                    const pdaData = CRUSH_PDA_LAYOUT.decode(accountInfo.data.slice(8));
-                    console.log(`  PDA data for ${entry.symmetricTag}: filled=${pdaData.filled}, bump=${pdaData.bump}`);
-
-                    if (pdaData.filled === 2) {
-                        // Defer loud "MUTUAL MATCH FOUND" log until after successful decryption
-                        // localDecryptedIndex[i].status = "mutual"; // Set status later if decryption successful or with specific error status
-
-                        if (entry.symmetricKeyHex) { // Use symmetricKeyHex
-                            const K_common_bytes = hexToBytes(entry.symmetricKeyHex);
+            
+            // --- NEW: Check all possible tags, not just the primary one ---
+            const tagsToCheck = [entry.symmetricTag];
+            
+            // Add all stored possible tags if available
+            if (entry.allPossibleTags && Array.isArray(entry.allPossibleTags)) {
+                tagsToCheck.push(...entry.allPossibleTags.filter(t => t !== entry.symmetricTag));
+            }
+            
+            // If we don't have allPossibleTags stored, generate them now
+            if (!entry.allPossibleTags && entry.targetUserSolAddress) {
+                console.log(`Generating possible tags for existing entry to ${entry.targetUsername}...`);
+                try {
+                    // Fetch target's all keys
+                    const targetAllKeysResponse = await fetch(`${API_ROOT}/api/user/${entry.targetUserSolAddress}/all-app-pubkeys`);
+                    if (targetAllKeysResponse.ok) {
+                        const targetAllKeysData = await targetAllKeysResponse.json();
+                        if (targetAllKeysData.appPublicKeys && targetAllKeysData.appPublicKeys.length > 0) {
+                            // Include our historical keys
+                            const ourKeyVersions = [
+                                {
+                                    kWallet: sessionKWallet,
+                                    appPublicKeyHex: sessionAppPublicKeyHex,
+                                    version: 'current'
+                                },
+                                ...sessionKeyVersions
+                            ];
                             
-                            const pdaCipher1_onchain_b64 = Buffer.from(pdaData.cipher1).toString('base64');
-                            const pdaCipher2_onchain_b64 = Buffer.from(pdaData.cipher2).toString('base64');
-                            let otherCipherBytes_raw;
-
-                            if (entry.cipherMine === pdaCipher1_onchain_b64) {
-                                otherCipherBytes_raw = pdaData.cipher2;
-                                console.log(`  User's cipher (${entry.cipherMine.substring(0,8)}...) matches PDA.cipher1. Other party's is PDA.cipher2.`);
-                            } else if (entry.cipherMine === pdaCipher2_onchain_b64) {
-                                otherCipherBytes_raw = pdaData.cipher1;
-                                console.log(`  User's cipher (${entry.cipherMine.substring(0,8)}...) matches PDA.cipher2. Other party's is PDA.cipher1.`);
-                            } else {
-                                console.warn(`  User's cipher (${entry.cipherMine.substring(0,8)}...) does not match PDA.cipher1 (${pdaCipher1_onchain_b64.substring(0,8)}...) or PDA.cipher2 (${pdaCipher2_onchain_b64.substring(0,8)}...). This implies an issue with how 'cipherMine' was stored or compared, or the PDA content is unexpected for tag ${entry.symmetricTag}.`);
-                                otherCipherBytes_raw = null;
-                                localDecryptedIndex[i].status = "mutual_decryption_key_mismatch"; // Or "mutual_cipher_mismatch"
-                                localDecryptedIndex[i].revealedInfo = "Mutual (Cipher Mismatch)";
-                                anIndexWasUpdated = true; 
+                            // Generate all possible tags
+                            for (const ourKey of ourKeyVersions) {
+                                for (const theirKey of targetAllKeysData.appPublicKeys) {
+                                    try {
+                                        const theirKeyBytes = hexToBytes(theirKey.publicKeyHex);
+                                        const altSharedSecret = await generateSymmetricSharedSecret(ourKey.kWallet, theirKeyBytes);
+                                        const { symmetricTag: altTag } = await deriveSymmetricKeysFromSharedSecret(altSharedSecret);
+                                        const altTagHex = bytesToHex(altTag);
+                                        
+                                        if (!tagsToCheck.includes(altTagHex)) {
+                                            tagsToCheck.push(altTagHex);
+                                        }
+                                    } catch (e) {
+                                        // Skip this combination
+                                    }
+                                }
                             }
+                            
+                            // Update the entry with all possible tags for future checks
+                            localDecryptedIndex[i].allPossibleTags = tagsToCheck;
+                            anIndexWasUpdated = true;
+                        }
+                    }
+                } catch (e) {
+                    console.warn(`Failed to generate alternative tags for ${entry.targetUsername}:`, e);
+                }
+            }
+            
+            console.log(`Checking ${tagsToCheck.length} possible tags for pending crush to ${entry.targetUsername}`);
+            
+            let foundMutual = false;
+            let mutualTag = null;
+            let pdaData = null;
+            
+            // Check each possible tag
+            for (const tagHex of tagsToCheck) {
+                try {
+                    const tagBytes = hexToBytes(tagHex);
+                    const pdaSeeds = [Buffer.from("crush"), Buffer.from(tagBytes)];
+                    const [pdaPublicKey, _] = PublicKey.findProgramAddressSync(pdaSeeds, CRUSH_PROGRAM_ID);
+                    
+                    console.log(`  Checking PDA for tag ${tagHex.substring(0,16)}...: ${pdaPublicKey.toBase58()}`);
+                    const accountInfo = await connection.getAccountInfo(pdaPublicKey);
+                    
+                    if (accountInfo && accountInfo.data) {
+                        // Skip 8-byte discriminator for Anchor accounts
+                        const pdaDataCheck = CRUSH_PDA_LAYOUT.decode(accountInfo.data.slice(8));
+                        
+                        if (pdaDataCheck.filled === 2) {
+                            console.log(`  Found mutual match at tag ${tagHex.substring(0,16)}...!`);
+                            foundMutual = true;
+                            mutualTag = tagHex;
+                            pdaData = pdaDataCheck;
+                            break;
+                        }
+                    }
+                } catch (e) {
+                    // This tag doesn't exist or error checking, continue to next
+                }
+            }
+            // --- End NEW ---
+            
+            if (foundMutual && pdaData) {
+                console.log(`Processing mutual match found at tag ${mutualTag.substring(0,16)}...`);
+                
+                // Try to decrypt with various keys
+                // First, we need to identify which encryption key to use
+                let encryptionKeyToUse = null;
+                let K_common_bytes = null;
+                
+                if (entry.symmetricKeyHex) {
+                    K_common_bytes = hexToBytes(entry.symmetricKeyHex);
+                    encryptionKeyToUse = 'original';
+                }
+                
+                // If the mutual was found on a different tag, we might need a different key
+                if (mutualTag !== entry.symmetricTag && entry.allPossibleTags) {
+                    console.log(`Mutual found on alternative tag, may need different encryption key...`);
+                    // We'd need to regenerate the encryption key for this specific tag
+                    // This is complex - for now, try with the original key first
+                }
+                
+                if (K_common_bytes) {
+                    const pdaCipher1_onchain_b64 = Buffer.from(pdaData.cipher1).toString('base64');
+                    const pdaCipher2_onchain_b64 = Buffer.from(pdaData.cipher2).toString('base64');
+                    let otherCipherBytes_raw;
 
-                            if (otherCipherBytes_raw && otherCipherBytes_raw.length === 48) {
-                                // Ensure Uint8Array type for crypto operations
-                                const otherCipherForDecryption = Uint8Array.from(otherCipherBytes_raw);
-                                const nonce = otherCipherForDecryption.slice(0, 24);
-                                const encryptedDataWithAuthTag = otherCipherForDecryption.slice(24);
+                    if (entry.cipherMine === pdaCipher1_onchain_b64) {
+                        otherCipherBytes_raw = pdaData.cipher2;
+                        console.log(`  User's cipher matches PDA.cipher1. Other party's is PDA.cipher2.`);
+                    } else if (entry.cipherMine === pdaCipher2_onchain_b64) {
+                        otherCipherBytes_raw = pdaData.cipher1;
+                        console.log(`  User's cipher matches PDA.cipher2. Other party's is PDA.cipher1.`);
+                    } else {
+                        console.warn(`  User's cipher does not match either PDA cipher. Checking if we submitted to different tag...`);
+                        // The cipher might be on the original tag, not this alternative tag
+                        // Mark as mutual but with special status
+                        localDecryptedIndex[i].status = "mutual_different_tag";
+                        localDecryptedIndex[i].revealedInfo = "Mutual (Found on different tag)";
+                        localDecryptedIndex[i].actualMutualTag = mutualTag;
+                        anIndexWasUpdated = true;
+                        continue;
+                    }
+
+                    if (otherCipherBytes_raw && otherCipherBytes_raw.length === 48) {
+                        // Ensure Uint8Array type for crypto operations
+                        const otherCipherForDecryption = Uint8Array.from(otherCipherBytes_raw);
+                        const nonce = otherCipherForDecryption.slice(0, 24);
+                        const encryptedDataWithAuthTag = otherCipherForDecryption.slice(24);
+                        
+                        // --- Try decrypting with multiple keys (existing logic) ---
+                        let decryptionSuccessful = false;
+                        let decryptedPayload = null;
+                        let usedKeyVersion = 'current';
+                        
+                        // First try with current key
+                        try {
+                            const cryptoInstance = xchacha20poly1305(K_common_bytes, nonce);
+                            decryptedPayload = cryptoInstance.decrypt(encryptedDataWithAuthTag);
+                            decryptionSuccessful = true;
+                            console.log(`  Successfully decrypted with current key`);
+                        } catch (currentKeyError) {
+                            console.log(`  Failed to decrypt with current key, trying historical keys...`);
+                            
+                            // Try with all stored key versions
+                            for (const keyVersion of sessionKeyVersions) {
+                                if (keyVersion.appPublicKeyHex === sessionAppPublicKeyHex) {
+                                    continue; // Skip current key, we already tried it
+                                }
                                 
-                                // --- NEW: Try decrypting with multiple keys ---
-                                let decryptionSuccessful = false;
-                                let decryptedPayload = null;
-                                let usedKeyVersion = 'current';
-                                
-                                // First try with current key
                                 try {
-                                    const cryptoInstance = xchacha20poly1305(K_common_bytes, nonce);
-                                    decryptedPayload = cryptoInstance.decrypt(encryptedDataWithAuthTag);
-                                    decryptionSuccessful = true;
-                                    console.log(`  Successfully decrypted with current key`);
-                                } catch (currentKeyError) {
-                                    console.log(`  Failed to decrypt with current key, trying historical keys...`);
+                                    // Fetch target user's historical keys
+                                    const targetAllKeysResponse = await fetch(`${API_ROOT}/api/user/${entry.targetUserSolAddress || selectedTargetUser?.primary_sol_address}/all-app-pubkeys`);
+                                    if (!targetAllKeysResponse.ok) continue;
                                     
-                                    // Try with all stored key versions
-                                    for (const keyVersion of sessionKeyVersions) {
-                                        if (keyVersion.appPublicKeyHex === sessionAppPublicKeyHex) {
-                                            continue; // Skip current key, we already tried it
-                                        }
-                                        
+                                    const targetAllKeysData = await targetAllKeysResponse.json();
+                                    if (!targetAllKeysData.appPublicKeys) continue;
+                                    
+                                    // Try each combination of our historical keys with their historical keys
+                                    for (const targetKey of targetAllKeysData.appPublicKeys) {
                                         try {
-                                            // Fetch target user's historical keys
-                                            const targetAllKeysResponse = await fetch(`${API_ROOT}/api/user/${entry.targetUserSolAddress || selectedTargetUser?.primary_sol_address}/all-app-pubkeys`);
-                                            if (!targetAllKeysResponse.ok) continue;
+                                            const targetKeyBytes = hexToBytes(targetKey.publicKeyHex);
+                                            const historicalSharedSecret = await generateSymmetricSharedSecret(keyVersion.kWallet, targetKeyBytes);
+                                            const { symmetricEncryptionKey: historicalK } = await deriveSymmetricKeysFromSharedSecret(historicalSharedSecret);
                                             
-                                            const targetAllKeysData = await targetAllKeysResponse.json();
-                                            if (!targetAllKeysData.appPublicKeys) continue;
-                                            
-                                            // Try each combination of our historical keys with their historical keys
-                                            for (const targetKey of targetAllKeysData.appPublicKeys) {
-                                                try {
-                                                    const targetKeyBytes = hexToBytes(targetKey.publicKeyHex);
-                                                    const historicalSharedSecret = await generateSymmetricSharedSecret(keyVersion.kWallet, targetKeyBytes);
-                                                    const { symmetricEncryptionKey: historicalK } = await deriveSymmetricKeysFromSharedSecret(historicalSharedSecret);
-                                                    
-                                                    const historicalCrypto = xchacha20poly1305(historicalK, nonce);
-                                                    decryptedPayload = historicalCrypto.decrypt(encryptedDataWithAuthTag);
-                                                    decryptionSuccessful = true;
-                                                    usedKeyVersion = `${keyVersion.version}+${targetKey.version}`;
-                                                    console.log(`  Successfully decrypted with historical keys: our ${keyVersion.version} + their ${targetKey.version}`);
-                                                    break;
-                                                } catch (e) {
-                                                    // This combination didn't work, try next
-                                                }
-                                            }
-                                            if (decryptionSuccessful) break;
-                                        } catch (fetchError) {
-                                            console.warn(`  Could not fetch historical keys for target user: ${fetchError.message}`);
+                                            const historicalCrypto = xchacha20poly1305(historicalK, nonce);
+                                            decryptedPayload = historicalCrypto.decrypt(encryptedDataWithAuthTag);
+                                            decryptionSuccessful = true;
+                                            usedKeyVersion = `${keyVersion.version}+${targetKey.version}`;
+                                            console.log(`  Successfully decrypted with historical keys: our ${keyVersion.version} + their ${targetKey.version}`);
+                                            break;
+                                        } catch (e) {
+                                            // This combination didn't work, try next
                                         }
                                     }
+                                    if (decryptionSuccessful) break;
+                                } catch (fetchError) {
+                                    console.warn(`  Could not fetch historical keys for target user: ${fetchError.message}`);
                                 }
-                                // --- End NEW ---
-                                
-                                if (decryptionSuccessful && decryptedPayload) {
-                                    console.log(`  MUTUAL MATCH FOUND & DECRYPTED for symmetric tag: ${entry.symmetricTag}! (Key version: ${usedKeyVersion})`);
-                                    localDecryptedIndex[i].status = "mutual"; // Set status to full mutual
-                                    anIndexWasUpdated = true;
+                            }
+                        }
+                        // --- End decryption attempts ---
+                        
+                        if (decryptionSuccessful && decryptedPayload) {
+                            console.log(`  MUTUAL MATCH FOUND & DECRYPTED! (Key version: ${usedKeyVersion})`);
+                            localDecryptedIndex[i].status = "mutual"; // Set status to full mutual
+                            localDecryptedIndex[i].actualMutualTag = mutualTag; // Store which tag it was found on
+                            anIndexWasUpdated = true;
 
-                                    if (decryptedPayload.length === 8) {
-                                        const view = new DataView(decryptedPayload.buffer, decryptedPayload.byteOffset, decryptedPayload.byteLength);
-                                        const theirFidInPayload = view.getUint32(0, true); 
-                                        const myFidInPayload = view.getUint32(4, true);    
-                                        
-                                        console.log(`  Successfully decrypted other party's payload! Their FID: ${theirFidInPayload}, My FID: ${myFidInPayload}`);
-                                        localDecryptedIndex[i].revealedInfo = `Mutual with FID ${theirFidInPayload}`;
-                                    } else {
-                                        console.warn("  Decrypted payload from other party has unexpected length:", decryptedPayload.length);
-                                        localDecryptedIndex[i].revealedInfo = "Mutual (Payload Format Error)";
-                                    }
-                                } else {
-                                    console.error(`  Failed to decrypt other party's cipher for symmetric tag ${entry.symmetricTag} with any available keys`);
-                                    localDecryptedIndex[i].status = "mutual_decryption_failed"; // Special status
-                                    localDecryptedIndex[i].revealedInfo = "Mutual (Decryption Error - Try Re-authenticating)";
-                                    anIndexWasUpdated = true; 
-                                }
-                            } else if (otherCipherBytes_raw === null && localDecryptedIndex[i].status !== "mutual_decryption_key_mismatch") {
-                                // This case should ideally not be hit if the above logic correctly sets status on mismatch
-                                console.warn(`  Could not identify or process other party's cipher for tag ${entry.symmetricTag} (otherCipherBytes_raw is null/invalid and not a key mismatch).`);
-                                localDecryptedIndex[i].status = "mutual_cipher_unavailable";
-                                localDecryptedIndex[i].revealedInfo = "Mutual (Cipher Unavailable)";
-                                anIndexWasUpdated = true;
+                            if (decryptedPayload.length === 8) {
+                                const view = new DataView(decryptedPayload.buffer, decryptedPayload.byteOffset, decryptedPayload.byteLength);
+                                const theirFidInPayload = view.getUint32(0, true); 
+                                const myFidInPayload = view.getUint32(4, true);    
+                                
+                                console.log(`  Successfully decrypted other party's payload! Their FID: ${theirFidInPayload}, My FID: ${myFidInPayload}`);
+                                localDecryptedIndex[i].revealedInfo = `Mutual with FID ${theirFidInPayload}`;
+                            } else {
+                                console.warn("  Decrypted payload from other party has unexpected length:", decryptedPayload.length);
+                                localDecryptedIndex[i].revealedInfo = "Mutual (Payload Format Error)";
                             }
                         } else {
-                            console.warn(`  symmetricKeyHex missing for tag ${entry.symmetricTag}, cannot decrypt mutual payload.`);
-                            localDecryptedIndex[i].status = "mutual_key_missing"; // Special status
-                            localDecryptedIndex[i].revealedInfo = "Mutual (Key Missing)";
+                            console.error(`  Failed to decrypt other party's cipher with any available keys`);
+                            localDecryptedIndex[i].status = "mutual_decryption_failed"; // Special status
+                            localDecryptedIndex[i].revealedInfo = "Mutual (Decryption Error - Try Re-authenticating)";
+                            localDecryptedIndex[i].actualMutualTag = mutualTag;
                             anIndexWasUpdated = true; 
                         }
-
-                        const itemElement = document.querySelector(`[data-tag='${entry.symmetricTag}']`); // Use symmetricTag for querySelector
-                        if(itemElement) itemElement.style.backgroundColor = 'lightgreen'; 
-
-                    } else {
-                        console.log(`  PDA for symmetric tag ${entry.symmetricTag} is not filled (filled=${pdaData.filled}).`);
                     }
                 } else {
-                    console.log(`  No account data found for PDA of symmetric tag: ${entry.symmetricTag}. It might not be initialized yet.`);
+                    console.warn(`  symmetricKeyHex missing, cannot decrypt mutual payload.`);
+                    localDecryptedIndex[i].status = "mutual_key_missing"; // Special status
+                    localDecryptedIndex[i].revealedInfo = "Mutual (Key Missing)";
+                    localDecryptedIndex[i].actualMutualTag = mutualTag;
+                    anIndexWasUpdated = true; 
                 }
-            } catch (pdaError) {
-                console.error(`Error checking PDA for symmetric tag ${entry.symmetricTag}:`, pdaError);
+
+                const itemElement = document.querySelector(`[data-tag='${entry.symmetricTag}']`);
+                if(itemElement) itemElement.style.backgroundColor = 'lightgreen'; 
+
+            } else {
+                console.log(`  No mutual match found across ${tagsToCheck.length} possible tags`);
             }
         }
     }
@@ -1833,7 +1917,7 @@ async function handleSendCrush() {
         }
     } catch(e) {
         console.error("Invalid target user's main Solana address:", edPubTargetMainSolKeyString, e);
-        updateStatusMessage("The target user's main Solana address appears invalid.", true);
+        updateStatusMessage("The target user's Solana address appears invalid.", true);
         return;
     }
     
@@ -1859,6 +1943,57 @@ async function handleSendCrush() {
         // 3. Derive SYMMETRIC encryption key (K_common) and SYMMETRIC tag (tag_common) from the shared secret
         updateStatusMessage("Deriving symmetric encryption key and tag...");
         const { symmetricEncryptionKey, symmetricTag } = await deriveSymmetricKeysFromSharedSecret(symmetricSharedSecret);
+        
+        // --- NEW: Also generate tags for ALL possible key combinations ---
+        const allPossibleTags = [];
+        allPossibleTags.push({ 
+            tag: symmetricTag, 
+            tagHex: bytesToHex(symmetricTag),
+            keyVersion: `current+latest`,
+            encryptionKey: symmetricEncryptionKey
+        });
+        
+        // Try with all our historical keys against all their keys
+        if (selectedTargetUser.allAppKeys && selectedTargetUser.allAppKeys.length > 1) {
+            console.log(`Target user has ${selectedTargetUser.allAppKeys.length} app keys, generating tags for all combinations...`);
+            
+            // Include current session key in the list if not already there
+            const ourKeyVersions = [
+                {
+                    kWallet: sessionKWallet,
+                    appPublicKeyHex: sessionAppPublicKeyHex,
+                    version: 'current'
+                },
+                ...sessionKeyVersions
+            ];
+            
+            // Generate tags for all combinations
+            for (const ourKey of ourKeyVersions) {
+                for (const theirKey of selectedTargetUser.allAppKeys) {
+                    try {
+                        const theirKeyBytes = hexToBytes(theirKey.publicKeyHex);
+                        const altSharedSecret = await generateSymmetricSharedSecret(ourKey.kWallet, theirKeyBytes);
+                        const { symmetricEncryptionKey: altKey, symmetricTag: altTag } = await deriveSymmetricKeysFromSharedSecret(altSharedSecret);
+                        const altTagHex = bytesToHex(altTag);
+                        
+                        // Don't add duplicates
+                        if (!allPossibleTags.some(t => t.tagHex === altTagHex)) {
+                            allPossibleTags.push({
+                                tag: altTag,
+                                tagHex: altTagHex,
+                                keyVersion: `${ourKey.version}+${theirKey.version}`,
+                                encryptionKey: altKey
+                            });
+                        }
+                    } catch (e) {
+                        console.warn(`Failed to generate tag for key combination ${ourKey.version}+${theirKey.version}:`, e);
+                    }
+                }
+            }
+        }
+        
+        console.log(`Generated ${allPossibleTags.length} possible tags for crush matching`);
+        // --- End NEW ---
 
         // 4. Encrypt payload using K_common (symmetricEncryptionKey)
         updateStatusMessage("Encrypting payload...");
@@ -1881,7 +2016,7 @@ async function handleSendCrush() {
         if (!relayResponse.ok) {
             const errorData = await relayResponse.json().catch(() => ({ message: 'Relay request failed with no JSON response.'}));
             
-            // --- NEW: Check for AlreadyMutual error ---
+            // --- Check for AlreadyMutual error (existing code) ---
             if (errorData.error && errorData.simulationLogs) {
                 const isAlreadyMutual = errorData.simulationLogs.some(log => 
                     log.includes('AlreadyMutual') || 
@@ -1909,7 +2044,8 @@ async function handleSendCrush() {
                         confirmationError: null,
                         targetUserAppPublicKeyHex: targetUserAppPublicKeyHex,
                         revealedInfo: `Mutual with FID ${selectedTargetUser.fid}`,
-                        recoveredFromError: true // Flag to indicate this was recovered
+                        recoveredFromError: true, // Flag to indicate this was recovered
+                        allPossibleTags: allPossibleTags.map(t => t.tagHex) // NEW: Store all possible tags
                     };
                     
                     // Check if this entry already exists (by symmetricTag)
@@ -1959,7 +2095,7 @@ async function handleSendCrush() {
                     return; // Exit early - we've handled this case
                 }
             }
-            // --- End NEW ---
+            // --- End AlreadyMutual check ---
             
             throw new Error(`Relay Error: ${errorData.message || relayResponse.statusText}`);
         }
@@ -2072,7 +2208,8 @@ async function handleSendCrush() {
                 txSignature: finalTxSignature, 
                 confirmationError: confirmationErrorDetail,
                 // Include target's app public key for potential future reference/debugging, if needed
-                targetUserAppPublicKeyHex: targetUserAppPublicKeyHex 
+                targetUserAppPublicKeyHex: targetUserAppPublicKeyHex,
+                allPossibleTags: allPossibleTags.map(t => t.tagHex) // NEW: Store all possible tags for future matching
             };
     
             const existingEntryIndex = currentIndexArray.findIndex(entry => entry.symmetricTag === newCrushEntry.symmetricTag);
